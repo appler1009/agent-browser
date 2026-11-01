@@ -48,6 +48,9 @@ final class CDP {
     private var initScripts: [(id: String, source: String)] = []
     private var nextScript = 1
     private var contextSeq = 1
+    /// In-memory streams handed out for Page.printToPDF with transferMode=ReturnAsStream (read via IO.read).
+    private var streams: [String: Data] = [:]
+    private var streamSeq = 0
     /// Named isolated worlds clients asked for; announced again on every new document (we evaluate in the page world).
     private var worldNames: [String] = []
 
@@ -417,6 +420,17 @@ final class CDP {
         case "Browser.setDownloadBehavior", "Browser.setPermission", "Browser.grantPermissions", "Browser.resetPermissions", "Browser.setWindowBounds":
             return [:]
 
+        // ---- IO (streams for PDFs)
+        case "IO.read":
+            let h = p["handle"] as? String ?? ""
+            guard let data = streams[h] else { throw CDPError(code: -32000, message: "Invalid stream handle") }
+            let off = max(0, p["offset"] as? Int ?? 0), size = p["size"] as? Int ?? 1 << 20
+            let end = min(data.count, off + size)
+            return ["data": data.subdata(in: min(off, data.count)..<end).base64EncodedString(), "base64Encoded": true, "eof": end >= data.count]
+        case "IO.close":
+            streams[p["handle"] as? String ?? ""] = nil
+            return [:]
+
         // ---- Target
         case "Target.setDiscoverTargets":
             st.discover = p["discover"] as? Bool ?? false
@@ -506,7 +520,6 @@ final class CDP {
             return [:]
         }
         let tab = try need(sess)
-        let ts = tabState(tab)
 
         switch method {
         // ---- Page
@@ -522,6 +535,12 @@ final class CDP {
         case "Page.captureScreenshot": return try await screenshot(tab, p)
         case "Page.printToPDF":
             let data = try await tab.webView.pdf()
+            if p["transferMode"] as? String == "ReturnAsStream" {
+                streamSeq += 1
+                let h = "pdf\(streamSeq)"
+                streams[h] = data
+                return ["data": "", "stream": h]
+            }
             return ["data": data.base64EncodedString()]
         case "Page.getLayoutMetrics":
             let m = try await page(tab, "cdpMetrics()")
@@ -649,7 +668,6 @@ final class CDP {
             }
             throw CDPError(code: -32601, message: "'\(method)' wasn't found")
         }
-        _ = ts
     }
 
     // MARK: command helpers

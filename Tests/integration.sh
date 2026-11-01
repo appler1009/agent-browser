@@ -268,6 +268,7 @@ if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(
   check "cdp: remote objects and callFunctionOn" '.h1Subtype=="node" and .callFunctionOn=="Sign in"' "$R"
   check "cdp: DOM query, box model, focus + insertText, mouse click focuses" '.querySelector and .boxHasSize and .typed=="alice" and .focusedAfterClick=="u"' "$R"
   check "cdp: screenshot and accessibility tree" '.screenshotBytes>1000 and .axNodes>2' "$R"
+  check "cdp: PDF inline and as an IO stream" '.pdfInline=="%PDF" and .pdfStream=="%PDF"' "$R"
   check "cdp: unsupported things fail loudly" '(.fetchEnable|test("not supported")) and (.browserContext|test("not supported")) and .unknown==-32601 and .unknownSession==-32001' "$R"
   check "cdp: createTarget/closeTarget" '.createdListed and .closed' "$R"
   R=$(ab cdp stop);                               check "cdp stop" '.ok and .result.running==false' "$R"

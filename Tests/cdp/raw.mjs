@@ -64,6 +64,12 @@ const shot = (await send('Page.captureScreenshot', { format: 'png' }, sessionId)
 out.screenshotBytes = Buffer.from(shot.data, 'base64').length;
 out.axNodes = (await send('Accessibility.getFullAXTree', {}, sessionId)).result.nodes.length;
 
+const pdf = (await send('Page.printToPDF', {}, sessionId)).result;
+out.pdfInline = Buffer.from(pdf.data, 'base64').subarray(0, 4).toString();
+const streamed = (await send('Page.printToPDF', { transferMode: 'ReturnAsStream' }, sessionId)).result;
+const chunk = (await send('IO.read', { handle: streamed.stream, size: 4096 })).result;
+out.pdfStream = Buffer.from(chunk.data, 'base64').subarray(0, 4).toString();
+await send('IO.close', { handle: streamed.stream });
 out.fetchEnable = (await send('Fetch.enable', {}, sessionId)).error?.message;
 out.browserContext = (await send('Target.createBrowserContext')).error?.message;
 out.unknown = (await send('Nope.nothing', {}, sessionId)).error?.code;
