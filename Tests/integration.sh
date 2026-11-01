@@ -98,5 +98,29 @@ R=$(ab screenshot "$SHOT");                       check "screenshot written" '.o
 [ -s "$SHOT" ] && { PASS=$((PASS+1)); echo "ok   - png file exists"; } || { FAIL=$((FAIL+1)); echo "FAIL - png missing"; }
 rm -f "$SHOT"
 
+# --- MCP server over stdio ----------------------------------------------
+rpc() { # json-rpc lines on stdin -> responses on stdout
+  "$BIN" mcp
+}
+OUT=$(printf '%s\n' \
+ '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+ '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+ '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+ "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_open\",\"arguments\":{\"url\":\"file://$FIX/modal.html\"}}}" \
+ '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_snapshot","arguments":{}}}' \
+ '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"browser_click","arguments":{"ref":"@s1:e1"}}}' \
+ '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"browser_click","arguments":{"ref":"@s77:e1"}}}' \
+ '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}' \
+ '{"jsonrpc":"2.0","id":8,"method":"nope"}' | rpc)
+line() { echo "$OUT" | jq -c "select(.id==$1)"; }
+check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
+check "mcp tools/list has 9 tools" '.result.tools|length==9' "$(line 2)"
+check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
+check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s1") and test("@s1:e1")' "$(line 4)"
+check "mcp covered click is isError and names the cover" '.result.isError==true and (.result.content[0].text|test("ELEMENT_COVERED"))' "$(line 5)"
+check "mcp stale ref is isError STALE_REF" '.result.isError==true and (.result.content[0].text|test("STALE_REF"))' "$(line 6)"
+check "mcp screenshot returns an image" '.result.content[0].type=="image" and (.result.content[0].data|length>1000)' "$(line 7)"
+check "mcp unknown method -> JSON-RPC error" '.error.code==-32601' "$(line 8)"
+
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

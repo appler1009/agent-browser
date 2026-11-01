@@ -14,6 +14,7 @@ usage: agent-browser [--session NAME] <command> [args]
   screenshot [path]                default ./screenshot.png
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
   close                            stop the helper
+  mcp                              run as an MCP server on stdio (same tools, for Claude Code, Cursor, ...)
 Every command prints one JSON object: {ok, result, events, error}.
 """
 
@@ -66,27 +67,6 @@ func runDaemon(session: String) -> Never {
 func fail(_ code: String, _ message: String) -> Never {
     print(jsonString(["ok": false, "events": [], "error": ["code": code, "message": message, "retry_safe": true]]))
     exit(1)
-}
-
-func spawnDaemon(session: String) {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
-    p.arguments = ["--session", session, "daemon"]
-    p.standardInput = FileHandle.nullDevice
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { fail("DAEMON_START_FAILED", "could not start helper: \(error.localizedDescription)") }
-}
-
-func connectOrStart(session: String) -> Int32 {
-    let path = socketPath(session: session)
-    if let fd = connectSocket(path) { return fd }
-    spawnDaemon(session: session)
-    for _ in 0..<150 {
-        usleep(100_000)
-        if let fd = connectSocket(path) { return fd }
-    }
-    fail("DAEMON_START_FAILED", "helper did not come up within 15s")
 }
 
 func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
@@ -162,6 +142,9 @@ guard let cmd = argv.first else {
 if cmd == "daemon" {
     MainActor.assumeIsolated { runDaemon(session: session) }
 }
+if cmd == "mcp" {
+    runMCP(session: session)
+}
 if cmd == "--help" || cmd == "-h" || cmd == "help" {
     print(usage)
     exit(0)
@@ -174,16 +157,16 @@ if cmd == "close", connectSocket(socketPath(session: session)) == nil {
     exit(0)
 }
 
-let fd = connectOrStart(session: session)
-writeAllToSocket(fd, jsonString(request) + "\n")
-guard let line = readLineFromSocket(fd) else {
-    if cmd == "close" {
+let line: String
+switch sendToHelper(session: session, request: request) {
+case .success(let l): line = l
+case .failure(let e):
+    if cmd == "close" && e.code == "NO_RESPONSE" {  // helper exits right after acknowledging close
         print(jsonString(["ok": true, "result": ["closed": true], "events": []]))
         exit(0)
     }
-    fail("NO_RESPONSE", "helper closed the connection without replying")
+    fail(e.code, e.message)
 }
-close(fd)
 
 if textOnly, let r = parseJSON(line), r["ok"] as? Bool == true,
    let res = r["result"] as? [String: Any], let tree = res["tree"] as? String {
