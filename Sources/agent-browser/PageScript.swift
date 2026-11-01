@@ -360,7 +360,46 @@ let pageScript = #"""
     return { ok: true, x: h.x, y: h.y };
   }
   const NON_TEXT = ['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color', 'hidden'];
-  API.act = function (op, ref, arg, watch) {
+  // Origin of the document an element lives in, in the same canonical form the helper uses.
+  function docOrigin(el) {
+    try { const l = el.ownerDocument.defaultView.location; return l.protocol + '//' + l.host; } catch (e) { return null; }
+  }
+  function originMismatch(name, allowed, actual) {
+    return err('ORIGIN_MISMATCH', 'Vault entry "' + name + '" is only valid on ' + allowed.join(', ') + ', but this page is ' + actual + '. Nothing was entered.',
+      { entry: name });
+  }
+  function fillField(el, arg, secret) {
+    const tag = el.tagName, ty = (el.type || '').toLowerCase();
+    const isField = tag === 'TEXTAREA' || (tag === 'INPUT' && !NON_TEXT.includes(ty));
+    const desc = describe(el);
+    if (!isField && !el.isContentEditable) return err('NOT_FILLABLE', desc + ' is not a text field.', { element: desc });
+    const a = actionable(el);
+    if (!a.ok) return a;
+    if (el.readOnly) return err('ELEMENT_READONLY', desc + ' is read-only.', { element: desc });
+    el.focus({ preventScroll: true });
+    if (isField) {
+      const proto = tag === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, arg);
+    } else el.textContent = arg;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: arg }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (secret) return { ok: true, element: desc, value: '(from vault)' };
+    const res = { ok: true, element: desc, value: ty === 'password' ? '•'.repeat(arg.length) : short(arg, 80) };
+    if (isField && el.value !== arg && ty !== 'password') res.value_after = short(el.value, 80);
+    return res;
+  }
+  function doSubmit(el) {
+    const form = el.tagName === 'FORM' ? el : (el.form || el.closest('form'));
+    if (API.watch && form) highlight(form);
+    if (!form) return err('NO_FORM', describe(el) + ' is not inside a form.', { element: describe(el) });
+    if (!form.noValidate && !form.checkValidity()) {
+      const bad = form.querySelector(':invalid');
+      return err('VALIDATION_FAILED', 'Form not submitted; ' + (bad ? describe(bad) + ': ' + bad.validationMessage : 'it is invalid') + '.', { element: bad ? describe(bad) : null });
+    }
+    form.requestSubmit();
+    return { ok: true, element: describe(form) };
+  }
+  API.act = function (op, ref, arg, watch, opts) {
     API.watch = !!watch;
     const r = resolve(ref);
     if (r.error) return r.error;
@@ -380,22 +419,11 @@ let pageScript = #"""
         return { ok: true, element: describe(el) };
       }
       if (op === 'fill') {
-        const tag = el.tagName, ty = (el.type || '').toLowerCase();
-        const isField = tag === 'TEXTAREA' || (tag === 'INPUT' && !NON_TEXT.includes(ty));
-        if (!isField && !el.isContentEditable) return err('NOT_FILLABLE', describe(el) + ' is not a text field.', { element: describe(el) });
-        const a = actionable(el);
-        if (!a.ok) return a;
-        if (el.readOnly) return err('ELEMENT_READONLY', describe(el) + ' is read-only.', { element: describe(el) });
-        el.focus({ preventScroll: true });
-        if (isField) {
-          const proto = tag === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
-          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, arg);
-        } else el.textContent = arg;
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: arg }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        const res = { ok: true, element: describe(el), value: ty === 'password' ? '•'.repeat(arg.length) : short(arg, 80) };
-        if (isField && el.value !== arg && ty !== 'password') res.value_after = short(el.value, 80);
-        return res;
+        if (opts && opts.origins) {
+          const o = docOrigin(el);
+          if (!opts.origins.includes(o)) return originMismatch(opts.name, opts.origins, o);
+        }
+        return fillField(el, arg, !!(opts && opts.secret));
       }
       if (op === 'upload') {
         if (el.tagName !== 'INPUT' || (el.type || '').toLowerCase() !== 'file')
@@ -414,21 +442,68 @@ let pageScript = #"""
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return { ok: true, element: describe(el), files: spec.map((f) => f.name) };
       }
-      if (op === 'submit') {
-        const form = el.tagName === 'FORM' ? el : (el.form || el.closest('form'));
-        if (API.watch && form) highlight(form);
-        if (!form) return err('NO_FORM', describe(el) + ' is not inside a form.', { element: describe(el) });
-        if (!form.noValidate && !form.checkValidity()) {
-          const bad = form.querySelector(':invalid');
-          return err('VALIDATION_FAILED', 'Form not submitted; ' + (bad ? describe(bad) + ': ' + bad.validationMessage : 'it is invalid') + '.', { element: bad ? describe(bad) : null });
-        }
-        form.requestSubmit();
-        return { ok: true, element: describe(form) };
-      }
+      if (op === 'submit') return doSubmit(el);
       return err('BAD_OP', 'Unknown op ' + op);
     } catch (e) {
       return err('ACTION_FAILED', String(e && e.message || e), { retry_safe: false });
     }
+  };
+
+  // ---- vault login: find the username / password / one-time-code fields and fill them -------------
+  function collectInputs() {
+    const out = [];
+    const walk = (root, depth) => {
+      for (const el of root.querySelectorAll('*')) {
+        if (el.tagName === 'INPUT') out.push(el);
+        if (depth < 5 && el.shadowRoot) walk(el.shadowRoot, depth + 1);
+        if (depth < 5 && el.tagName === 'IFRAME') { try { if (el.contentDocument) walk(el.contentDocument, depth + 1); } catch (e) {} }
+      }
+    };
+    walk(document, 0);
+    return out;
+  }
+  const TEXTY = ['', 'text', 'email', 'tel', 'url'];
+  const hint = (el) => [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.autocomplete].join(' ').toLowerCase();
+  const OTP_RE = /otp|totp|one.?time|verification|2fa|mfa|authenticator|security.?code|passcode|\bcode\b/;
+  const USER_RE = /user|login|e-?mail|account|phone|identifier|signin|sign-in/;
+  API.login = function (plan, watch) {
+    API.watch = !!watch;
+    const here = location.protocol + '//' + location.host;
+    if (!plan.origins.includes(here)) return originMismatch(plan.name, plan.origins, here);
+    const inputs = collectInputs().filter((el) => !isHidden(el) && !isDisabled(el) && !el.readOnly);
+    const pw = inputs.find((el) => el.type === 'password') || null;
+    const isOtp = (el) => TEXTY.concat(['number']).includes((el.type || '').toLowerCase()) && el !== pw &&
+      (/one-time-code/.test(el.autocomplete || '') || OTP_RE.test(hint(el)));
+    const otpEl = plan.otp ? inputs.find(isOtp) || null : null;
+    const cands = inputs.filter((el) => TEXTY.includes((el.type || '').toLowerCase()) && !isOtp(el) && !/search|query/.test(hint(el)));
+    let user = null;
+    if (pw) {
+      const before = cands.filter((el) => inputs.indexOf(el) < inputs.indexOf(pw));
+      user = before.filter((el) => el.form && el.form === pw.form).pop() || before.pop() || null;
+    } else if (!otpEl) {
+      user = cands.find((el) => /username|email/.test(el.autocomplete || '') || USER_RE.test(hint(el))) || (cands.length === 1 ? cands[0] : null);
+    }
+    const plans = [['username', user, plan.username], ['password', pw, plan.password], ['otp', otpEl, plan.otp]]
+      .filter((p) => p[1] && p[2] != null);
+    if (!plans.length)
+      return err('NO_LOGIN_FIELDS', 'No visible username, password or one-time-code field was found on this page. Nothing was entered. Take a snapshot and use fill with --secret on a specific field.');
+    const filled = [];
+    let last = null;
+    for (const [what, el, value] of plans) {
+      const r = fillField(el, value, true);
+      if (!r.ok) { r.filled = filled; r.message = what + ': ' + r.message; return r; }
+      filled.push(what);
+      last = el;
+    }
+    const res = { ok: true, filled: filled };
+    if (plan.otp && !otpEl) res.note = 'The entry has a TOTP secret but no one-time-code field is on this page yet.';
+    if (!plan.otp && inputs.some(isOtp) && !pw) res.note = 'This page asks for a one-time code, but the entry has no TOTP secret.';
+    if (plan.submit) {
+      const s = doSubmit(last);
+      if (!s.ok) { s.filled = filled; return s; }
+      res.submitted = true;
+    }
+    return res;
   };
 
   API.waitState = function (sel, gone, text, urlSub) {

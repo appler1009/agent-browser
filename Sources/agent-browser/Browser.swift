@@ -465,7 +465,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             return jsonString(["ok": false, "events": [],
                                "error": CmdError(code: "BAD_REQUEST", message: "request was not valid JSON").dict])
         }
-        return jsonString(await handle(req))
+        return jsonString(redactor.scrub(await handle(req)) as? [String: Any] ?? [:])
     }
 
     private func handle(_ req: [String: Any]) async -> [String: Any] {
@@ -536,7 +536,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "open": return try await open(args)
         case "snapshot": return try await snapshot(args)
         case "click": return try await act("click", ref: try str(args, "ref"), arg: "")
-        case "fill": return try await act("fill", ref: try str(args, "ref"), arg: try str(args, "text"))
+        case "fill":
+            if let name = args["secret"] as? String { return try await fillSecret(name, args) }
+            return try await act("fill", ref: try str(args, "ref"), arg: try str(args, "text"))
+        case "login": return try await login(args)
+        case "vault": return try vaultList()
         case "submit": return try await act("submit", ref: try str(args, "ref"), arg: "")
         case "upload": return try await upload(args)
         case "wait": return try await wait(args)
@@ -590,7 +594,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let c = cdp ?? CDP(browser: self)
         cdp = c
         switch args["action"] as? String ?? "start" {
-        case "start": return try c.start(port: UInt16((args["port"] as? Double) ?? 0))
+        case "start":
+            if !redactor.isEmpty {
+                throw CmdError(code: "VAULT_CDP_BLOCKED", message: "this session has typed vault secrets into pages; a DevTools client could read them back, so cdp cannot start here. Use a different --session for DevTools.")
+            }
+            return try c.start(port: UInt16((args["port"] as? Double) ?? 0))
         case "stop": c.stop(); return ["running": false]
         case "status": return c.status()
         default: throw CmdError(code: "USAGE", message: "cdp takes start [--port N] | stop | status")
@@ -720,7 +728,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return r
     }
 
-    private func act(_ op: String, ref: String, arg: String) async throws -> [String: Any] {
+    private func act(_ op: String, ref: String, arg: String, opts: [String: Any]? = nil,
+                     call: String = "return window.__abApi.act(op, ref, arg, watch, opts)",
+                     callArgs: [String: Any]? = nil) async throws -> [String: Any] {
         if navInFlight { _ = await waitForNavigation(timeout: 15) }
         let beforeURL = webView.url?.absoluteString
         let beforeNav = navCount
@@ -728,9 +738,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let beforeMut = (try await js("return window.__abApi.mut") as? NSNumber)?.intValue ?? 0
         let mark = events.count
 
-        guard var res = try await js("return window.__abApi.act(op, ref, arg, watch)",
-                                     ["op": op, "ref": ref, "arg": arg, "watch": watch.visible])
-            as? [String: Any]
+        let jsArgs: [String: Any] = callArgs ?? ["op": op, "ref": ref, "arg": arg, "watch": watch.visible, "opts": opts ?? NSNull()]
+        guard var res = try await js(call, jsArgs) as? [String: Any]
         else { throw CmdError(code: "ACTION_FAILED", message: "no result from page", retrySafe: false) }
 
         if res["ok"] as? Bool != true {
@@ -778,6 +787,94 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         res["outcome"] = outcome
         res["url"] = afterURL ?? ""
         return res
+    }
+
+    // MARK: vault
+
+    let redactor = Redactor()
+    private lazy var vaultStore: VaultStore = makeVaultStore()
+
+    private func vaultList() throws -> [String: Any] {
+        let rows = try vaultStore.list().map { r -> [String: Any] in
+            ["name": r.name, "origins": r.meta.origins, "totp": r.meta.totp, "confirm": r.meta.confirm]
+        }
+        return ["entries": rows]
+    }
+
+    /// Looks an entry up and checks everything that must hold before a value may leave the vault.
+    private func unlock(_ name: String, action: String, needs: [String]) async throws -> (VaultEntry, String) {
+        guard validVaultName(name) else { throw CmdError(code: "USAGE", message: "invalid vault entry name") }
+        guard let entry = try vaultStore.get(name) else {
+            let names = (try? vaultStore.list().map(\.name)) ?? []
+            throw CmdError(code: "VAULT_NO_ENTRY", message: "no vault entry \"\(name)\"" + (names.isEmpty ? " (the vault is empty; the user adds entries with `agent-browser vault add`)" : "; entries: \(names.joined(separator: ", "))"))
+        }
+        if cdp?.isRunning == true {
+            throw CmdError(code: "VAULT_CDP_BLOCKED", message: "the DevTools endpoint is running; a DevTools client could read typed secrets, so vault entries are not used while it runs. Run `cdp stop` or use another session.")
+        }
+        let page = canonicalOrigin(webView.url) ?? "(none)"
+        guard entry.meta.origins.contains(page) else {
+            vaultAudit(vaultStore, ["entry": name, "action": action, "origin": page, "outcome": "ORIGIN_MISMATCH"])
+            throw CmdError(code: "ORIGIN_MISMATCH", message: "Vault entry \"\(name)\" is only valid on \(entry.meta.origins.joined(separator: ", ")), but this page is \(page). Nothing was entered.", extra: ["entry": name])
+        }
+        for f in needs where f == "totp" && entry.secret.totp == nil {
+            throw CmdError(code: "VAULT_NO_FIELD", message: "entry \"\(name)\" has no TOTP secret.")
+        }
+        if entry.meta.confirm {
+            watch.step("waiting for approval to use vault entry \(name)…", ok: true)
+            let a = await requestApproval(reason: "agent-browser wants to use the saved login \"\(name)\" on \(page)", store: vaultStore)
+            guard a.ok else {
+                vaultAudit(vaultStore, ["entry": name, "action": action, "origin": page, "outcome": "APPROVAL_DENIED", "why": a.why])
+                throw CmdError(code: "VAULT_APPROVAL_DENIED", message: "use of vault entry \"\(name)\" was not approved (\(a.why)). Nothing was entered.")
+            }
+        }
+        return (entry, page)
+    }
+
+    private func fillSecret(_ name: String, _ args: [String: Any]) async throws -> [String: Any] {
+        let ref = try str(args, "ref")
+        let field = (args["field"] as? String) ?? "password"
+        guard ["username", "password", "totp"].contains(field) else {
+            throw CmdError(code: "USAGE", message: "--field must be username, password or totp")
+        }
+        let (entry, page) = try await unlock(name, action: "fill", needs: [field])
+        let value: String
+        switch field {
+        case "username": value = entry.secret.username
+        case "totp": value = totpCode(try parseTOTP(entry.secret.totp ?? ""))
+        default: value = entry.secret.password
+        }
+        if field != "username" { redactor.add(value) }
+        do {
+            let res = try await act("fill", ref: ref, arg: value, opts: ["origins": entry.meta.origins, "name": name, "secret": true])
+            vaultAudit(vaultStore, ["entry": name, "action": "fill", "field": field, "origin": page, "outcome": "ok"])
+            return res.merging(["entry": name, "field": field]) { a, _ in a }
+        } catch let e as CmdError {
+            vaultAudit(vaultStore, ["entry": name, "action": "fill", "field": field, "origin": page, "outcome": e.code])
+            throw e
+        }
+    }
+
+    private func login(_ args: [String: Any]) async throws -> [String: Any] {
+        let name = try str(args, "secret")
+        let (entry, page) = try await unlock(name, action: "login", needs: [])
+        let otp = entry.secret.totp.flatMap { try? parseTOTP($0) }.map { totpCode($0) }
+        redactor.add(entry.secret.password)
+        redactor.add(otp)
+        let plan: [String: Any] = ["name": name, "origins": entry.meta.origins, "username": entry.secret.username,
+                                   "password": entry.secret.password, "otp": otp ?? NSNull(),
+                                   "submit": args["submit"] as? Bool == true]
+        do {
+            var res = try await act("login", ref: "", arg: "", call: "return window.__abApi.login(plan, watch)",
+                                    callArgs: ["plan": plan, "watch": watch.visible])
+            let filled = res["filled"] as? [String] ?? []
+            vaultAudit(vaultStore, ["entry": name, "action": "login", "fields": filled, "origin": page,
+                                    "submitted": res["submitted"] as? Bool ?? false, "outcome": "ok"])
+            res["entry"] = name
+            return res
+        } catch let e as CmdError {
+            vaultAudit(vaultStore, ["entry": name, "action": "login", "origin": page, "outcome": e.code])
+            throw e
+        }
     }
 
     // MARK: uploads

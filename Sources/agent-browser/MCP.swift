@@ -9,7 +9,8 @@ browser_submit) -> browser_snapshot again. Refs look like @s2:e5 and are only va
 printed them; after a navigation or a new snapshot, old refs return STALE_REF (no action was performed). \
 Actions fail loudly: ELEMENT_COVERED names the element in the way, ELEMENT_HIDDEN / ELEMENT_DISABLED / \
 VALIDATION_FAILED explain why nothing happened. Every result lists page events (navigation, dialogs, console \
-errors, failed requests). Use browser_wait (selector, text, url, idle) instead of sleeping. browser_watch \
+errors, failed requests). To sign in, use browser_vault_list then browser_login or browser_fill_secret; you \
+never see passwords or codes and must not ask for them. Use browser_wait (selector, text, url, idle) instead of sleeping. browser_watch \
 shows a live window the user can pause to take over.
 """
 
@@ -30,6 +31,12 @@ private let mcpTools: [[String: Any]] = [
          ["ref": sRef], required: ["ref"]),
     tool("browser_fill", "Replace the text of an input, textarea or contenteditable by ref.",
          ["ref": sRef, "text": ["type": "string"]], required: ["ref", "text"]),
+    tool("browser_vault_list", "Names, allowed sites and flags of the saved logins the user put in the bot vault. Values are never shown to you."),
+    tool("browser_fill_secret", "Type a vault value into a field by ref. You choose the entry name and field; the helper supplies the value and only does so on the entry's own site (else ORIGIN_MISMATCH). Use this for passwords and one-time codes; never ask the user to paste them.",
+         ["ref": sRef, "secret": ["type": "string", "description": "vault entry name from browser_vault_list"],
+          "field": ["type": "string", "enum": ["username", "password", "totp"], "description": "default password"]], required: ["ref", "secret"]),
+    tool("browser_login", "Sign in with a vault entry: finds the visible username, password and one-time-code fields on the current page and fills them (optionally submitting). For two-step logins call it again on the next step.",
+         ["secret": ["type": "string", "description": "vault entry name"], "submit": ["type": "boolean", "description": "submit the form afterwards"]], required: ["secret"]),
     tool("browser_submit", "Submit a form (ref may be the form or any control in it). Respects HTML validation and reports the first invalid field.",
          ["ref": sRef], required: ["ref"]),
     tool("browser_wait", "Wait until all given conditions hold, or time out. Provide at least one condition.",
@@ -91,6 +98,12 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
         return ["cmd": "block", "args": args]
     case "browser_click": return ["cmd": "click", "args": ["ref": s("ref")]]
     case "browser_fill": return ["cmd": "fill", "args": ["ref": s("ref"), "text": s("text")]]
+    case "browser_vault_list": return ["cmd": "vault", "args": [:]]
+    case "browser_fill_secret":
+        var args: [String: Any] = ["ref": s("ref"), "secret": s("secret")]
+        if !s("field").isEmpty { args["field"] = s("field") }
+        return ["cmd": "fill", "args": args]
+    case "browser_login": return ["cmd": "login", "args": ["secret": s("secret"), "submit": a["submit"] as? Bool == true]]
     case "browser_submit": return ["cmd": "submit", "args": ["ref": s("ref")]]
     case "browser_wait":
         var args: [String: Any] = [:]

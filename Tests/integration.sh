@@ -16,7 +16,10 @@ check() { # name, jq-filter, json
 ref() { # tree, regex -> first ref on a line matching regex
   echo "$1" | grep -E "$2" | head -1 | grep -oE '@s[0-9]+:e[0-9]+' | head -1
 }
-trap 'ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof"' EXIT
+VT="$(mktemp -d)"
+export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
+vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
+trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof"' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -190,7 +193,7 @@ OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has all 20 tools" '.result.tools|length==20' "$(line 2)"
+check "mcp tools/list has all 23 tools" '(.result.tools|length)==23 and ([.result.tools[].name]|(index("browser_login")!=null and index("browser_fill_secret")!=null and index("browser_vault_list")!=null))' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
 check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
 MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
@@ -251,6 +254,95 @@ R=$(ab snapshot --max-chars 2000);                check "--max-chars budget is r
 R=$(ab snapshot --interactive --max-nodes 50);    check "--interactive lists only actionable elements" '(.result.tree|contains("text \"")|not) and .result.refs==50' "$R"
 R=$(ab snapshot --selector '#only');              check "--selector scopes to a subtree" '.result.refs==1 and (.result.tree|contains("Only one"))' "$R"
 R=$(ab snapshot --selector '#nope');              check "--selector with no match is an error" '.ok==false and .error.code=="BAD_SELECTOR"' "$R"
+
+
+# --- vault: credentials for bots -----------------------------------------
+PW='Zq9-vault-pw-1'; PW2='other-pw-4567'; TSECRET='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
+R=$(ab vault selftest);                           check "vault: TOTP matches RFC 6238 vectors" '.ok and .result.selftest=="ok"' "$R"
+R=$(printf '%s\n' "$PW" | ab vault add site --origin file:// --username alice);   check "vault add (password read from stdin, never argv)" '.ok and .result.added=="site"' "$R"
+R=$(printf '%s\n' "$PW2" | ab vault add other --origin https://example.com --username bob);  check "vault add https origin" '.ok and (.result.origins==["https://example.com"])' "$R"
+R=$(printf '%s\n' x | ab vault add bad --origin http://example.com --username u);  check "vault add rejects plain http to a remote host" '.ok==false and (.error.message|test("https"))' "$R"
+R=$(printf '%s\n' "$PW" | ab vault add site --origin file:// --username alice);   check "vault add refuses to overwrite without --replace" '.ok==false and .error.code=="VAULT_EXISTS"' "$R"
+R=$(ab vault list);                               check "vault list shows names, sites, flags and no values" '.ok and (.result.entries|length==2) and (.result.entries[0]|has("password")|not)' "$R"
+echo "$R" | grep -q -e "$PW" -e alice && { FAIL=$((FAIL+1)); echo "FAIL - vault list leaked a credential"; } || { PASS=$((PASS+1)); echo "ok   - vault list output holds no credentials"; }
+R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault add nope --origin https://example.com --username u </dev/null);  check "vault add needs a terminal (an agent cannot create entries)" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
+R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault rm site </dev/null);  check "vault rm needs a terminal" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
+
+vab open "file://$FIX/login.html" >/dev/null
+T=$(vab snapshot | jq -r .result.tree); U=$(ref "$T" 'Username'); P=$(ref "$T" 'Password'); B=$(ref "$T" 'button "Log in"')
+R=$(vab fill "$U" --secret site --field username);  check "fill --secret username" '.ok and .result.value=="(from vault)" and .result.entry=="site"' "$R"
+R=$(vab fill "$P" --secret site);                 check "fill --secret password never echoes the value" '.ok and .result.value=="(from vault)"' "$R"
+T=$(vab snapshot | jq -r .result.tree)
+echo "$T" | grep -q 'value=•••(' && { PASS=$((PASS+1)); echo "ok   - snapshot masks the typed password"; } || { FAIL=$((FAIL+1)); echo "FAIL - password not masked in snapshot"; echo "$T"; }
+R=$(vab click "$(ref "$T" 'button "Log in"')");  check "login form submitted; the password in the GET url is redacted" '.ok and (.result.outcome|test("navigated: done.html\\?user=alice")) and (.result.url|contains("[redacted]"))' "$R"
+vab wait --text "Hello alice" --timeout 3000 | jq -e '.ok' >/dev/null && { PASS=$((PASS+1)); echo "ok   - the page received the real username"; } || { FAIL=$((FAIL+1)); echo "FAIL - username not received"; }
+
+vab open "file://$FIX/login.html" >/dev/null
+R=$(vab login site --submit);                     check "login fills username + password and submits" '.ok and .result.filled==["username","password"] and .result.submitted==true and (.result.outcome|test("navigated: done.html\\?user=alice"))' "$R"
+vab open "file://$FIX/login.html" >/dev/null
+R=$(vab login other);                             check "login on the wrong site -> ORIGIN_MISMATCH" '.ok==false and .error.code=="ORIGIN_MISMATCH" and (.error.message|test("Nothing was entered"))' "$R"
+T=$(vab snapshot | jq -r .result.tree); U=$(ref "$T" 'Username')
+R=$(vab fill "$U" --secret other --field username); check "fill --secret on the wrong site -> ORIGIN_MISMATCH" '.ok==false and .error.code=="ORIGIN_MISMATCH"' "$R"
+echo "$(vab snapshot | jq -r .result.tree)" | grep -q 'value="bob"' && { FAIL=$((FAIL+1)); echo "FAIL - a mismatched entry still typed into the page"; } || { PASS=$((PASS+1)); echo "ok   - nothing was typed after the mismatch"; }
+R=$(vab login nope);                              check "login with an unknown entry lists what exists" '.ok==false and .error.code=="VAULT_NO_ENTRY" and (.error.message|test("site"))' "$R"
+vab open "file://$FIX/done.html" >/dev/null
+R=$(vab login site);                              check "login with no fields on the page -> NO_LOGIN_FIELDS" '.ok==false and .error.code=="NO_LOGIN_FIELDS"' "$R"
+R=$(vab fill @s1:e1 --secret site --field bogus); check "fill --secret rejects an unknown field" '.ok==false' "$R"
+
+# two-step login (identifier first, then password)
+R=$(printf '%s\n' "$PW" | ab vault add mail --origin file:// --username alice@example.test);  check "vault add (email username)" '.ok' "$R"
+vab open "file://$FIX/twostep1.html" >/dev/null
+R=$(vab login mail --submit);                     check "two-step: first page fills only the username" '.ok and .result.filled==["username"] and (.result.outcome|test("navigated: twostep2.html"))' "$R"
+R=$(vab login mail --submit);                     check "two-step: second page fills only the password" '.ok and .result.filled==["password"] and (.result.outcome|test("navigated: done.html"))' "$R"
+
+# TOTP
+R=$(printf '%s\n%s\n' "$PW" "$TSECRET" | ab vault add tfa --origin file:// --username alice --totp);  check "vault add --totp validates the secret" '.ok and .result.totp==true' "$R"
+R=$(printf '%s\n%s\n' "$PW" "not base32 !" | ab vault add tfabad --origin file:// --username alice --totp);  check "vault add --totp rejects a bad secret" '.ok==false' "$R"
+[ $(( $(date +%s) % 30 )) -ge 27 ] && sleep 4
+CODE=$(python3 - <<PY
+import hmac,hashlib,struct,time,base64
+k=base64.b32decode("$TSECRET"); c=struct.pack(">Q",int(time.time())//30)
+h=hmac.new(k,c,hashlib.sha1).digest(); o=h[-1]&15
+print("%06d"%((struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000))
+PY
+)
+AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" open "file://$FIX/twofactor.html?expect=$CODE" >/dev/null  # not logged: the test itself knows the code
+R=$(vab login tfa);                               check "login fills the current TOTP code too" '.ok and .result.filled==["username","password","otp"]' "$R"
+vab wait --text "OTP OK" --timeout 3000 | jq -e '.ok' >/dev/null && { PASS=$((PASS+1)); echo "ok   - the typed one-time code is correct"; } || { FAIL=$((FAIL+1)); echo "FAIL - one-time code was wrong"; }
+echo "$(vab snapshot | jq -r .result.tree)" | grep -q "$CODE" && { FAIL=$((FAIL+1)); echo "FAIL - one-time code visible in snapshot"; } || { PASS=$((PASS+1)); echo "ok   - one-time code is redacted from snapshots"; }
+R=$(vab fill @s1:e1 --secret site --field totp);  check "fill --field totp on an entry without TOTP fails" '.ok==false and .error.code!="INTERNAL"' "$R"
+
+# the session that typed secrets cannot expose a DevTools endpoint
+R=$(vab cdp start);                               check "cdp is refused once secrets were typed in the session" '.ok==false and .error.code=="VAULT_CDP_BLOCKED"' "$R"
+vc() { AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vcdp" "$BIN" "$@"; }
+vc open "file://$FIX/login.html" >/dev/null; vc cdp start >/dev/null
+R=$(vc login site);                               check "vault is refused while the DevTools endpoint runs" '.ok==false and .error.code=="VAULT_CDP_BLOCKED"' "$R"
+vc cdp stop >/dev/null; vc close >/dev/null
+
+# confirm: human approval per use
+R=$(printf '%s\n' "$PW" | ab vault add guarded --origin file:// --username alice --confirm);  check "vault add --confirm" '.ok and .result.confirm==true' "$R"
+vab open "file://$FIX/login.html" >/dev/null
+R=$(vab login guarded);                           check "confirm entry without approval is denied and types nothing" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"
+for mode in yes no; do
+  vx() { AGENT_BROWSER_VAULT_APPROVE=$mode AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-v$( [ $mode = yes ] && echo ok || echo no)" "$BIN" "$@"; }
+  vx open "file://$FIX/login.html" >/dev/null
+  R=$(vx login guarded)
+  if [ $mode = yes ]; then check "confirm entry is used once approved" '.ok and .result.filled==["username","password"]' "$R"
+  else check "confirm entry is not used when the person says no" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"; fi
+done
+
+# audit trail
+R=$(ab vault audit --limit 50);                   check "audit records fills, mismatches and denials" '.ok and ([.result.entries[].outcome]|index("ok")!=null and index("ORIGIN_MISMATCH")!=null and index("APPROVAL_DENIED")!=null) and ([.result.entries[]|select(.action=="login")]|length>=3)' "$R"
+# mcp
+M=$( { printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"browser_vault_list","arguments":{}}}'; sleep 1; } | AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" mcp | sed -n 2p )
+check "mcp browser_vault_list returns names without values" '.result.isError==false and (.result.content[0].text|contains("site") and (contains("Zq9")|not))' "$M"
+# nothing the agent could see contains a stored value
+if grep -q -e "$PW" -e "$PW2" -e "$TSECRET" -e "$CODE" "$VT/all-output.log" "$VT/vault.json.audit"; then
+  FAIL=$((FAIL+1)); echo "FAIL - a stored secret appeared in command output or the audit log"; grep -n -e "$PW" -e "$PW2" -e "$CODE" "$VT/all-output.log" | cut -c1-200 | head -3
+else PASS=$((PASS+1)); echo "ok   - no stored secret appears in any command output or the audit log"; fi
+R=$(ab vault rm guarded);                         check "vault rm" '.ok and .result.removed=="guarded"' "$R"
+R=$(ab vault list);                               check "vault list after rm" '(.result.entries|map(.name)|index("guarded"))==null' "$R"
 
 # --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then

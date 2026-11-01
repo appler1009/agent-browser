@@ -10,6 +10,9 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
                                    accessibility-style tree with refs like @s1:e3; the flags cap its size (tokens)
   click <ref>
   fill <ref> <text...>
+  fill <ref> --secret <entry> [--field username|password|totp]   type a vault value; the agent never sees it
+  login <entry> [--submit]         fill the username/password/one-time-code fields on the page from a vault entry
+  vault list | audit [--limit N]   saved logins (names and sites only); `vault add|rm` are for the user, in a terminal
   submit <ref>                     ref may be the form or any control inside it
   wait [--load] [--idle] [--download] [--selector CSS] [--gone CSS] [--text T] [--url SUBSTR] [--ms N] [--timeout MS]
   screenshot [path]                default ./screenshot.png
@@ -89,7 +92,7 @@ func absolutePath(_ p: String) -> String {
 func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
     var positional: [String] = []
     var flags: [String: String] = [:]
-    let boolFlags: Set<String> = cmd == "snapshot" ? ["text", "interactive"] : ["load", "idle", "download"]
+    let boolFlags: Set<String> = cmd == "snapshot" ? ["text", "interactive"] : ["load", "idle", "download", "submit"]
     var i = 0
     while i < rest.count {
         let a = rest[i]
@@ -140,9 +143,21 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         needPositional(1, "<ref>")
         args["ref"] = positional[0]
     case "fill":
-        needPositional(2, "<ref> <text>")
-        args["ref"] = positional[0]
-        args["text"] = positional[1...].joined(separator: " ")
+        if let name = flags["secret"] {
+            needPositional(1, "<ref>")
+            if positional.count > 1 { fail("USAGE", "fill --secret takes no text; the value comes from the vault") }
+            args["ref"] = positional[0]
+            args["secret"] = name
+            if let f = flags["field"] { args["field"] = f }
+        } else {
+            needPositional(2, "<ref> <text>")
+            args["ref"] = positional[0]
+            args["text"] = positional[1...].joined(separator: " ")
+        }
+    case "login":
+        needPositional(1, "<entry>")
+        args["secret"] = positional[0]
+        if flags["submit"] != nil { args["submit"] = true }
     case "wait":
         if flags["load"] != nil { args["load"] = true }
         if flags["idle"] != nil { args["idle"] = true }
@@ -203,6 +218,9 @@ guard let cmd = argv.first else {
 if cmd == "daemon" {
     daemonProfile = profile
     MainActor.assumeIsolated { runDaemon(session: session) }
+}
+if cmd == "vault" {
+    runVaultCLI(Array(argv.dropFirst()))
 }
 if cmd == "mcp" {
     runMCP(session: session, profile: profile)

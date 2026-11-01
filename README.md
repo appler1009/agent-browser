@@ -38,7 +38,7 @@ The first command starts a background helper that owns the page (`close` stops i
 |---|---|
 | `open <url>` | navigate; a URL that is a file download is saved and reported |
 | `snapshot [--text] [--interactive] [--max-chars N] [--max-nodes N] [--selector CSS]` | tree with refs (`@s3:e7`); same-origin iframes and open shadow roots included; flags cap the size |
-| `click` / `submit <ref>`, `fill <ref> <text>`, `upload <ref> <abs-path…>` | act on an element |
+| `click` / `submit <ref>`, `fill <ref> <text>`, `fill <ref> --secret <entry>`, `login <entry>`, `upload <ref> <abs-path…>` | act on an element |
 | `wait [--load] [--idle] [--download] [--selector] [--gone] [--text] [--url] [--ms] [--timeout]` | wait for conditions |
 | `screenshot [path]` | PNG of the viewport |
 | `tabs`, `tab new [url]` / `switch <id>` / `close [id]` | popups and `target=_blank` open as a new current tab |
@@ -46,6 +46,7 @@ The first command starts a background helper that owns the page (`close` stops i
 | `cookies export [file]` / `import <file>` / `clear`, `storage export` / `import` | move login state in or out |
 | `viewport [W H]`, `useragent <ua>\|reset`, `block images\|media\|fonts\|scripts\|styles\|url <re>\|clear` | page environment |
 | `watch [on\|off\|pause\|resume\|status]` | live window; `pause` hands control to you |
+| `vault list` / `audit` (`add`, `rm` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
 | `status`, `cdp`, `mcp`, `close` | |
 
 `--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Exported cookie files are written `0600`.
@@ -69,7 +70,26 @@ The first command starts a background helper that owns the page (`close` stops i
 claude mcp add agent-browser -- /path/to/agent-browser mcp
 ```
 
-20 tools (`browser_open`, `browser_snapshot`, `browser_click`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
+23 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
+
+## Vault (logins for bots)
+
+The bots have their own credential store, separate from your Passwords app and Safari. Entries live in the login keychain under `dev.appler.agent-browser.vault`.
+
+```sh
+agent-browser vault add github --origin https://github.com --totp --confirm   # you, in a terminal; prompts hide the password
+agent-browser login github --submit        # the agent: fills username, password and the current one-time code
+agent-browser fill @s1:e4 --secret github --field password
+```
+
+- **Agents see names, not values.** The helper types the value; results, events, snapshots and errors never contain it, and anything a page echoes back (a password in a GET url) is redacted. No command reads a value out.
+- **Locked to the site.** An entry only works on its own origin (https, or http on localhost); elsewhere you get `ORIGIN_MISMATCH` and nothing is typed. The check also runs inside the page at fill time.
+- **`vault add` and `rm` need an interactive terminal**, so a program cannot create, replace or delete entries. Replacing an entry means typing the password again.
+- **`--totp`** stores a base32 secret or `otpauth://` URI; `login` fills the current code. **`--confirm`** asks for Touch ID or your password on every use.
+- **Audit:** every use is logged without values to `~/.agent-browser/vault-audit.log` (`vault audit`).
+- **Not combined with DevTools:** a session that typed secrets refuses `cdp start`, and entries are refused while it runs, since a DevTools client could read the page.
+
+The vault protects the password and the TOTP seed. It does not hide the signed-in session itself (`cookies export` still returns session cookies), a visible one-time code can show up in a screenshot, and a compromised site you allowed can read what you type into it.
 
 ## DevTools protocol (thin)
 

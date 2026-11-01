@@ -81,6 +81,8 @@ final class CDP {
         server.stop()
     }
 
+    var isRunning: Bool { server.running }
+
     func status() -> [String: Any] {
         guard server.running else { return ["running": false] }
         let http = "http://127.0.0.1:\(server.port)"

@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>Two factor</title></head><body>
+<h1>Sign in</h1>
+<form action="done.html" method="get">
+  <label for="u">Username</label><input id="u" name="user" autocomplete="username">
+  <label for="p">Password</label><input id="p" name="pass" type="password">
+  <label for="o">Verification code</label><input id="o" name="code" autocomplete="one-time-code" inputmode="numeric">
+  <button type="submit">Verify</button>
+</form>
+<p id="status"></p>
+<script>
+  // ?expect=NNNNNN lets a test check the exact code that was typed without reading it back.
+  const expect = new URLSearchParams(location.search).get('expect');
+  document.getElementById('o').addEventListener('input', (e) => {
+    document.getElementById('status').textContent = e.target.value === expect ? 'OTP OK' : 'OTP BAD';
+  });
+</script>
+</body></html>
