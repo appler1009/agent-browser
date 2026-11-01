@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Download</title></head><body>
+<h1>Download</h1>
+<a id="dl" download="payload.txt">Get payload</a>
+<script>
+// A blob: URL is same-origin, so the download attribute is honoured even when this page is a file:// URL.
+document.getElementById('dl').href = URL.createObjectURL(new Blob(['hello download\n'], { type: 'text/plain' }));
+</script>
+</body></html>

@@ -30,13 +30,25 @@ private let mcpTools: [[String: Any]] = [
     tool("browser_submit", "Submit a form (ref may be the form or any control in it). Respects HTML validation and reports the first invalid field.",
          ["ref": sRef], required: ["ref"]),
     tool("browser_wait", "Wait until all given conditions hold, or time out. Provide at least one condition.",
-         ["load": ["type": "boolean"], "idle": ["type": "boolean", "description": "no pending fetch/XHR and no DOM changes for ~500ms"],
+         ["load": ["type": "boolean"], "download": ["type": "boolean", "description": "a download has finished and none is in progress"], "idle": ["type": "boolean", "description": "no pending fetch/XHR and no DOM changes for ~500ms"],
           "selector": ["type": "string", "description": "CSS selector that is present and visible"],
           "gone": ["type": "string", "description": "CSS selector that is absent or hidden"],
           "text": ["type": "string"], "url": ["type": "string", "description": "substring of the current URL"],
           "ms": ["type": "number", "description": "fixed delay"], "timeout_ms": ["type": "number", "description": "default 10000"]]),
     tool("browser_screenshot", "Screenshot of the viewport, returned as an image.",
          ["path": ["type": "string", "description": "optional absolute path to also keep the PNG"]]),
+    tool("browser_upload", "Set files on an input[type=file] by ref (hidden file inputs are listed in snapshots). Paths must be absolute; 25 MB total.",
+         ["ref": sRef, "paths": ["type": "array", "items": ["type": "string"]]], required: ["ref", "paths"]),
+    tool("browser_tabs", "List open tabs (id, url, title, active)."),
+    tool("browser_tab", "Manage tabs. Popups and target=_blank links open as a new current tab and are reported as 'opened tab tN'. Refs from another tab's snapshot are STALE_REF.",
+         ["action": ["type": "string", "enum": ["new", "switch", "close"]], "url": ["type": "string", "description": "for new"],
+          "id": ["type": "string", "description": "tab id like t2, for switch/close"]], required: ["action"]),
+    tool("browser_downloads", "Files saved from downloads. A click that triggers a download also reports it as its outcome."),
+    tool("browser_cookies", "Export (returns cookies inline, or writes 'path'), import (from absolute 'path') or clear cookies of the profile.",
+         ["action": ["type": "string", "enum": ["export", "import", "clear"]], "path": ["type": "string"]], required: ["action"]),
+    tool("browser_storage", "Export or import localStorage/sessionStorage for the current page's origin.",
+         ["action": ["type": "string", "enum": ["export", "import"]], "path": ["type": "string"]], required: ["action"]),
+    tool("browser_status", "Session, profile (null = temporary), tab count, watch state."),
     tool("browser_watch", "Show or hide the live watch window for the user. 'pause' hands control to the user; agent commands then wait until 'resume'.",
          ["mode": ["type": "string", "enum": ["on", "off", "pause", "resume", "status"]]], required: ["mode"]),
     tool("browser_close", "Stop the browser helper and discard its temporary profile."),
@@ -56,7 +68,7 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
     case "browser_submit": return ["cmd": "submit", "args": ["ref": s("ref")]]
     case "browser_wait":
         var args: [String: Any] = [:]
-        for k in ["load", "idle"] { if a[k] as? Bool == true { args[k] = true } }
+        for k in ["load", "idle", "download"] { if a[k] as? Bool == true { args[k] = true } }
         for k in ["selector", "gone", "text", "url"] where !s(k).isEmpty { args[k] = s(k) }
         if let ms = n("ms") { args["ms"] = ms }
         if let t = n("timeout_ms") { args["timeout"] = t }
@@ -65,6 +77,20 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
         let keep = s("path")
         let path = keep.isEmpty ? NSTemporaryDirectory() + "agent-browser-\(UUID().uuidString).png" : keep
         return ["cmd": "screenshot", "args": ["path": path], "_keep": !keep.isEmpty]
+    case "browser_upload":
+        return ["cmd": "upload", "args": ["ref": s("ref"), "paths": a["paths"] as? [String] ?? []]]
+    case "browser_tabs": return ["cmd": "tabs", "args": [:]]
+    case "browser_tab":
+        var args: [String: Any] = ["action": s("action")]
+        if !s("url").isEmpty { args["url"] = s("url") }
+        if !s("id").isEmpty { args["id"] = s("id") }
+        return ["cmd": "tab", "args": args]
+    case "browser_downloads": return ["cmd": "downloads", "args": [:]]
+    case "browser_cookies", "browser_storage":
+        var args: [String: Any] = ["action": s("action")]
+        if !s("path").isEmpty { args["path"] = s("path") }
+        return ["cmd": name == "browser_cookies" ? "cookies" : "storage", "args": args]
+    case "browser_status": return ["cmd": "status", "args": [:]]
     case "browser_watch": return ["cmd": "watch", "args": ["mode": s("mode").isEmpty ? "on" : s("mode")]]
     case "browser_close": return ["cmd": "close", "args": [:]]
     default: return nil
@@ -73,14 +99,14 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
 
 private func text(_ s: String) -> [String: Any] { ["type": "text", "text": s] }
 
-private func callTool(session: String, name: String, arguments: [String: Any]) -> [String: Any] {
+private func callTool(session: String, profile: String?, name: String, arguments: [String: Any]) -> [String: Any] {
     guard var req = toolRequest(name, arguments) else {
         return ["isError": true, "content": [text("unknown tool \(name)")]]
     }
     let keep = req.removeValue(forKey: "_keep") as? Bool ?? true
     let cmd = req["cmd"] as? String ?? ""
     let reply: [String: Any]
-    switch sendToHelper(session: session, request: req) {
+    switch sendToHelper(session: session, profile: profile, request: req) {
     case .success(let line):
         reply = parseJSON(line) ?? ["ok": false, "error": ["code": "BAD_REPLY", "message": line]]
     case .failure(let e):
@@ -107,7 +133,7 @@ private func callTool(session: String, name: String, arguments: [String: Any]) -
     return ["isError": !ok, "content": content]
 }
 
-func runMCP(session: String) -> Never {
+func runMCP(session: String, profile: String? = nil) -> Never {
     func send(_ obj: [String: Any]) {
         FileHandle.standardOutput.write(Data((jsonString(obj) + "\n").utf8))
     }
@@ -135,7 +161,7 @@ func runMCP(session: String) -> Never {
         case "tools/call":
             let name = params["name"] as? String ?? ""
             send(["jsonrpc": "2.0", "id": id,
-                  "result": callTool(session: session, name: name, arguments: params["arguments"] as? [String: Any] ?? [:])])
+                  "result": callTool(session: session, profile: profile, name: name, arguments: params["arguments"] as? [String: Any] ?? [:])])
         default:
             send(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "method not found: \(method)"]])
         }

@@ -14,7 +14,7 @@ final class WatchWebView: WKWebView {
 @MainActor
 final class WatchWindow: NSObject, NSWindowDelegate {
     private let window: NSWindow
-    private let webView: WatchWebView
+    private var webView: WatchWebView
     private let title: String
     private let container = NSView()
     private let webHolder = NSView()
@@ -65,6 +65,17 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
         refreshControls()
         hide()
+    }
+
+    /// Makes `wv` the page shown in the window (used when the current tab changes).
+    func attach(_ wv: WatchWebView) {
+        if wv === webView && wv.superview === webHolder { return }
+        webView.removeFromSuperview()
+        webView.interactive = false
+        webView = wv
+        wv.interactive = paused
+        webHolder.addSubview(wv)
+        wv.frame = NSRect(origin: .zero, size: vp)
     }
 
     // MARK: show / hide

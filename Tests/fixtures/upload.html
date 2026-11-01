@@ -1,0 +1,12 @@
+<!doctype html><html><head><title>Upload</title></head><body>
+<h1>Upload</h1>
+<input id="f" type="file" multiple style="position:absolute;opacity:0;width:1px;height:1px" aria-label="Attachments">
+<button id="plain">Not a file input</button>
+<pre id="out">none</pre>
+<script>
+document.getElementById('f').addEventListener('change', async (e) => {
+  const lines = [];
+  for (const f of e.target.files) lines.push(f.name + ':' + f.size + ':' + (await f.text()).trim());
+  document.getElementById('out').textContent = 'got ' + lines.join(' | ');
+});
+</script></body></html>

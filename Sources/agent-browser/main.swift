@@ -4,17 +4,24 @@ import Foundation
 signal(SIGPIPE, SIG_IGN)
 
 let usage = """
-usage: agent-browser [--session NAME] <command> [args]
+usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   open <url> [--timeout MS]        navigate (starts the background helper on first use)
   snapshot [--text]                accessibility-style tree with refs like @s1:e3
   click <ref>
   fill <ref> <text...>
   submit <ref>                     ref may be the form or any control inside it
-  wait [--load] [--idle] [--selector CSS] [--gone CSS] [--text T] [--url SUBSTR] [--ms N] [--timeout MS]
+  wait [--load] [--idle] [--download] [--selector CSS] [--gone CSS] [--text T] [--url SUBSTR] [--ms N] [--timeout MS]
   screenshot [path]                default ./screenshot.png
+  upload <ref> <abs-path...>       set files on an input[type=file] (hidden ones are listed in snapshots)
+  tabs | tab new [url] | tab switch <id> | tab close [id]
+  downloads                        files saved from downloads (also reported as an action's outcome)
+  cookies export [file] | import <file> | clear
+  storage export [file] | import <file>      localStorage/sessionStorage of the current origin
+  status                           session, profile, tabs
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
   close                            stop the helper
   mcp                              run as an MCP server on stdio (same tools, for Claude Code, Cursor, ...)
+--profile NAME keeps cookies/storage between runs (default: temporary, discarded on close).
 Every command prints one JSON object: {ok, result, events, error}.
 """
 
@@ -69,10 +76,15 @@ func fail(_ code: String, _ message: String) -> Never {
     exit(1)
 }
 
+func absolutePath(_ p: String) -> String {
+    let e = (p as NSString).expandingTildeInPath
+    return e.hasPrefix("/") ? e : FileManager.default.currentDirectoryPath + "/" + e
+}
+
 func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
     var positional: [String] = []
     var flags: [String: String] = [:]
-    let boolFlags: Set<String> = cmd == "snapshot" ? ["text"] : ["load", "idle"]
+    let boolFlags: Set<String> = cmd == "snapshot" ? ["text"] : ["load", "idle", "download"]
     var i = 0
     while i < rest.count {
         let a = rest[i]
@@ -98,7 +110,7 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         needPositional(1, "<url>")
         args["url"] = positional[0]
         if let t = num("timeout") { args["timeout"] = t / 1000 }
-    case "snapshot", "close":
+    case "snapshot", "close", "tabs", "downloads", "status":
         break
     case "click", "submit":
         needPositional(1, "<ref>")
@@ -110,16 +122,29 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
     case "wait":
         if flags["load"] != nil { args["load"] = true }
         if flags["idle"] != nil { args["idle"] = true }
+        if flags["download"] != nil { args["download"] = true }
         for k in ["selector", "gone", "text", "url"] { if let v = flags[k] { args[k] = v } }
         if let ms = num("ms") { args["ms"] = ms }
         if let t = num("timeout") { args["timeout"] = t }
+    case "upload":
+        needPositional(2, "<ref> <abs-path...>")
+        args["ref"] = positional[0]
+        args["paths"] = positional.dropFirst().map { absolutePath($0) }
+    case "tab":
+        needPositional(1, "new [url] | switch <id> | close [id]")
+        args["action"] = positional[0]
+        if positional.count > 1 { args[positional[0] == "new" ? "url" : "id"] = positional[1] }
+    case "cookies", "storage":
+        needPositional(1, cmd == "cookies" ? "export [file] | import <file> | clear" : "export [file] | import <file>")
+        args["action"] = positional[0]
+        if positional.count > 1 { args["path"] = absolutePath(positional[1]) }
     case "watch":
         let mode = positional.first ?? "on"
         if !["on", "off", "pause", "resume", "status"].contains(mode) { fail("USAGE", "watch takes on|off|pause|resume|status") }
         args["mode"] = mode
     case "screenshot":
         let p = positional.first ?? "screenshot.png"
-        args["path"] = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
+        args["path"] = absolutePath(p)
     default:
         fail("USAGE", "unknown command \"\(cmd)\"\n\(usage)")
     }
@@ -133,6 +158,15 @@ if let i = argv.firstIndex(of: "--session"), i + 1 < argv.count {
     argv.removeSubrange(i...(i + 1))
 }
 session = sanitizeSession(session)
+var profile: String? = ProcessInfo.processInfo.environment["AGENT_BROWSER_PROFILE"]
+if let i = argv.firstIndex(of: "--profile"), i + 1 < argv.count {
+    profile = argv[i + 1]
+    argv.removeSubrange(i...(i + 1))
+}
+if let p = profile {
+    let ok = !p.isEmpty && p.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }
+    if !ok { fail("USAGE", "--profile may only contain letters, digits, - and _") }
+}
 
 guard let cmd = argv.first else {
     print(usage)
@@ -140,17 +174,19 @@ guard let cmd = argv.first else {
 }
 
 if cmd == "daemon" {
+    daemonProfile = profile
     MainActor.assumeIsolated { runDaemon(session: session) }
 }
 if cmd == "mcp" {
-    runMCP(session: session)
+    runMCP(session: session, profile: profile)
 }
 if cmd == "--help" || cmd == "-h" || cmd == "help" {
     print(usage)
     exit(0)
 }
 
-let (request, textOnly) = buildRequest(cmd, Array(argv.dropFirst()))
+var (request, textOnly) = buildRequest(cmd, Array(argv.dropFirst()))
+if let p = profile { request["profile"] = p }
 
 if cmd == "close", connectSocket(socketPath(session: session)) == nil {
     print(jsonString(["ok": true, "result": ["closed": false, "note": "no helper was running"], "events": []]))
@@ -158,7 +194,7 @@ if cmd == "close", connectSocket(socketPath(session: session)) == nil {
 }
 
 let line: String
-switch sendToHelper(session: session, request: request) {
+switch sendToHelper(session: session, profile: profile, request: request) {
 case .success(let l): line = l
 case .failure(let e):
     if cmd == "close" && e.code == "NO_RESPONSE" {  // helper exits right after acknowledging close

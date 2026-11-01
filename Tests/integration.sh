@@ -16,7 +16,7 @@ check() { # name, jq-filter, json
 ref() { # tree, regex -> first ref on a line matching regex
   echo "$1" | grep -E "$2" | head -1 | grep -oE '@s[0-9]+:e[0-9]+' | head -1
 }
-trap 'ab close >/dev/null 2>&1' EXIT
+trap 'ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION"' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -98,29 +98,105 @@ R=$(ab screenshot "$SHOT");                       check "screenshot written" '.o
 [ -s "$SHOT" ] && { PASS=$((PASS+1)); echo "ok   - png file exists"; } || { FAIL=$((FAIL+1)); echo "FAIL - png missing"; }
 rm -f "$SHOT"
 
+# --- tabs ----------------------------------------------------------------
+ab open "file://$FIX/tabs.html" >/dev/null
+T=$(ab snapshot | jq -r .result.tree); LINK=$(ref "$T" 'Open in new tab'); POP=$(ref "$T" 'Pop up')
+R=$(ab click "$LINK");                            check "target=_blank opens a new current tab" '.ok and (.result.outcome|test("^opened tab t2 \\(now current\\): done.html"))' "$R"
+ab wait --text "Hello bob" --timeout 4000 >/dev/null
+R=$(ab tabs);                                     check "tabs lists two, t2 active" '(.result.tabs|length==2) and (.result.tabs|map(select(.active))[0].id=="t2")' "$R"
+R=$(ab click "$LINK");                            check "ref from tab t1's snapshot is STALE_REF in t2" '.ok==false and .error.code=="STALE_REF"' "$R"
+R=$(ab tab switch t1);                            check "tab switch" '.ok and .result.current=="t1"' "$R"
+T=$(ab snapshot | jq -r .result.tree); POP=$(ref "$T" 'Pop up')
+echo "$T" | grep -q 'Tabs home' && { PASS=$((PASS+1)); echo "ok   - t1 still shows its own page"; } || { FAIL=$((FAIL+1)); echo "FAIL - t1 content"; }
+R=$(ab click "$POP");                             check "window.open opens tab t3" '.ok and (.result.outcome|test("opened tab t3"))' "$R"
+R=$(ab tab close t3);                             check "close current tab falls back to another" '.ok and .result.closed=="t3"' "$R"
+R=$(ab tab switch t9);                            check "unknown tab -> NO_SUCH_TAB" '.ok==false and .error.code=="NO_SUCH_TAB"' "$R"
+ab tab close t2 >/dev/null
+R=$(ab tab close);                                check "closing the only tab is refused" '.ok==false and .error.code=="LAST_TAB"' "$R"
+R=$(ab tab new "file://$FIX/done.html?user=dave"); check "tab new <url> loads it" '.ok and .result.tab=="t4" and (.result.url|test("dave"))' "$R"
+ab tab close >/dev/null
+
+# --- downloads -------------------------------------------------------------
+ab open "file://$FIX/download.html" >/dev/null
+T=$(ab snapshot | jq -r .result.tree); DL=$(ref "$T" 'Get payload')
+R=$(ab click "$DL");                              check "click on download link reports the file as outcome" '.ok and (.result.outcome|test("^download: payload.txt \\(15 bytes\\)"))' "$R"
+F=$(echo "$R" | jq -r .result.download.path)
+[ "$(cat "$F" 2>/dev/null)" = "hello download" ] && { PASS=$((PASS+1)); echo "ok   - downloaded file content is correct"; } || { FAIL=$((FAIL+1)); echo "FAIL - downloaded file ($F)"; }
+R=$(ab open "file://$FIX/blob.bin");              check "open on a non-displayable URL downloads it" '.ok and (.result.outcome|test("^download: blob.bin \\(2048 bytes\\)"))' "$R"
+R=$(ab downloads);                                check "downloads lists both as done" '(.result.downloads|length==2) and (.result.downloads|all(.state=="done"))' "$R"
+R=$(ab wait --download --timeout 2000);           check "wait --download returns when done" '.ok' "$R"
+
+# --- uploads -----------------------------------------------------------------
+UP="${TMPDIR:-/tmp}/ab-up-$$"; mkdir -p "$UP"; printf 'alpha' > "$UP/a.txt"; printf 'beta!' > "$UP/b.txt"
+ab open "file://$FIX/upload.html" >/dev/null
+T=$(ab snapshot | jq -r .result.tree); FI=$(ref "$T" 'file-input'); PL=$(ref "$T" 'Not a file input')
+echo "$T" | grep 'file-input' | grep -q 'hidden' && { PASS=$((PASS+1)); echo "ok   - hidden file input is listed and marked hidden"; } || { FAIL=$((FAIL+1)); echo "FAIL - file input listing"; echo "$T"; }
+R=$(ab upload "$FI" "$UP/a.txt" "$UP/b.txt");     check "upload sets multiple files" '.ok and (.result.files==["a.txt","b.txt"])' "$R"
+ab snapshot --text | grep -q 'got a.txt:5:alpha | b.txt:5:beta!' && { PASS=$((PASS+1)); echo "ok   - page received the file contents"; } || { FAIL=$((FAIL+1)); echo "FAIL - page did not receive files"; }
+T=$(ab snapshot | jq -r .result.tree); FI=$(ref "$T" 'file-input'); PL=$(ref "$T" 'Not a file input')
+R=$(ab upload "$PL" "$UP/a.txt");                 check "upload to a non-file element -> NOT_FILE_INPUT" '.ok==false and .error.code=="NOT_FILE_INPUT"' "$R"
+R=$(ab upload "$FI" "$UP/missing.txt");           check "missing file -> FILE_NOT_FOUND" '.ok==false and .error.code=="FILE_NOT_FOUND"' "$R"
+rm -rf "$UP"
+
+# --- cookies, storage, profiles -----------------------------------------------
+CK="${TMPDIR:-/tmp}/ab-cookies-$$.json"
+cat > "$CK" <<'JSON'
+[{"name":"sid","value":"abc123","domain":"example.com","path":"/","secure":true,"httpOnly":true,"expires":4102444800}]
+JSON
+R=$(ab cookies import "$CK");                     check "cookies import" '.ok and .result.imported==1' "$R"
+R=$(ab cookies export);                           check "cookies export returns it" '.result.cookies|map(select(.name=="sid" and .value=="abc123" and .httpOnly==true))|length==1' "$R"
+ab cookies export "$CK.out" >/dev/null
+[ "$(stat -f %Lp "$CK.out")" = "600" ] && { PASS=$((PASS+1)); echo "ok   - exported cookie file is owner-only (0600)"; } || { FAIL=$((FAIL+1)); echo "FAIL - cookie file permissions"; }
+R=$(ab cookies clear);                            check "cookies clear" '.ok and .result.cleared>=1' "$R"
+R=$(ab cookies export);                           check "cookies empty after clear" '.result.count==0' "$R"
+R=$(ab open https://example.com 2>/dev/null)
+if echo "$R" | jq -e '.ok' >/dev/null 2>&1; then
+  printf '{"origin":"https://example.com","local":{"k":"v"},"session":{}}' > "$CK"
+  R=$(ab storage import "$CK");                   check "storage import" '.ok and .result.imported_local==1' "$R"
+  R=$(ab storage export);                         check "storage export has the item" '.result.local.k=="v"' "$R"
+  printf '{"origin":"https://other.test","local":{}}' > "$CK"
+  R=$(ab storage import "$CK");                   check "storage import for another origin refused" '.ok==false and .error.code=="ORIGIN_MISMATCH"' "$R"
+else echo "skip - storage tests (no network)"; fi
+rm -f "$CK" "$CK.out"
+
+PS="$AGENT_BROWSER_SESSION-prof"; PN="itest$$"
+pab() { AGENT_BROWSER_SESSION="$PS" "$BIN" --profile "$PN" "$@"; }
+R=$(pab status);                                  check "status shows persistent profile" ".ok and .result.profile==\"$PN\" and .result.persistent==true" "$R"
+R=$("$BIN" --session "$PS" --profile other status); check "different profile on a running session is refused" '.ok==false and .error.code=="PROFILE_MISMATCH"' "$R"
+cat > "$HOME/.ab-itest-cookie.json" <<'JSON'
+[{"name":"keep","value":"me","domain":"example.org","path":"/","expires":4102444800}]
+JSON
+pab cookies import "$HOME/.ab-itest-cookie.json" >/dev/null; rm -f "$HOME/.ab-itest-cookie.json"
+pab close >/dev/null; sleep 2
+R=$(pab cookies export);                          check "cookie survives helper restart with the same profile" '.result.cookies|map(select(.name=="keep"))|length==1' "$R"
+pab cookies clear >/dev/null; pab close >/dev/null; sleep 1.5
+R=$(AGENT_BROWSER_SESSION="$PS" "$BIN" cookies export); check "a temporary session does not see the profile's cookies" '.result.count==0' "$R"
+AGENT_BROWSER_SESSION="$PS" "$BIN" close >/dev/null
+
 # --- MCP server over stdio ----------------------------------------------
-rpc() { # json-rpc lines on stdin -> responses on stdout
-  "$BIN" mcp
-}
-OUT=$(printf '%s\n' \
- '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
- '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
- '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
- "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_open\",\"arguments\":{\"url\":\"file://$FIX/modal.html\"}}}" \
- '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_snapshot","arguments":{}}}' \
- '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"browser_click","arguments":{"ref":"@s1:e1"}}}' \
- '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"browser_click","arguments":{"ref":"@s77:e1"}}}' \
- '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"browser_screenshot","arguments":{}}}' \
- '{"jsonrpc":"2.0","id":8,"method":"nope"}' | rpc)
+rpc() { "$BIN" mcp; }
+call() { echo "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}"; }
+OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+  echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  call 3 browser_open "{\"url\":\"file://$FIX/modal.html\"}"
+  call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has 9 tools" '.result.tools|length==9' "$(line 2)"
+check "mcp tools/list has all 16 tools" '.result.tools|length==16' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
-check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s1") and test("@s1:e1")' "$(line 4)"
+check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
+MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
+OUT=$( { call 5 browser_click "{\"ref\":\"$MBUY\"}"
+  call 6 browser_click '{"ref":"@s9999:e1"}'
+  call 7 browser_screenshot '{}'
+  call 8 browser_tabs '{}'
+  echo '{"jsonrpc":"2.0","id":9,"method":"nope"}'; } | rpc)
 check "mcp covered click is isError and names the cover" '.result.isError==true and (.result.content[0].text|test("ELEMENT_COVERED"))' "$(line 5)"
 check "mcp stale ref is isError STALE_REF" '.result.isError==true and (.result.content[0].text|test("STALE_REF"))' "$(line 6)"
 check "mcp screenshot returns an image" '.result.content[0].type=="image" and (.result.content[0].data|length>1000)' "$(line 7)"
-check "mcp unknown method -> JSON-RPC error" '.error.code==-32601' "$(line 8)"
+check "mcp browser_tabs works" '.result.isError==false and (.result.content[0].text|test("t1"))' "$(line 8)"
+check "mcp unknown method -> JSON-RPC error" '.error.code==-32601' "$(line 9)"
 
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

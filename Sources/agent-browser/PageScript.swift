@@ -206,8 +206,8 @@ let pageScript = #"""
   }
 
   // ---- snapshot ----------------------------------------------------------
-  API.snapshot = function () {
-    API.snap++;
+  API.snapshot = function (id) {
+    API.snap = id;
     API.map = new Map();
     const lines = [];
     let n = 0, count = 0, truncated = false;
@@ -237,13 +237,16 @@ let pageScript = #"""
       const role = roleOf(node);
       const kind = isInteractive(node, role);
       if (kind) {
-        if (isHidden(node)) return;
+        const hiddenFile = role === 'file-input' && isHidden(node);
+        if (isHidden(node) && !hiddenFile) return;
         const ref = prefix + (++n);
         API.map.set(n, node);
         const st = stateOf(node);
+        if (hiddenFile) st.push('hidden');
         const r = node.getBoundingClientRect();
         const inView = r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
-        if (inView) {
+        if (hiddenFile) { /* not rendered: no position to check */ }
+        else if (inView) {
           const h = hitTest(node);
           if (h.covered_by) st.push('covered by ' + h.covered_by);
         } else st.push('offscreen');
@@ -355,6 +358,23 @@ let pageScript = #"""
         const res = { ok: true, element: describe(el), value: ty === 'password' ? '•'.repeat(arg.length) : short(arg, 80) };
         if (isField && el.value !== arg && ty !== 'password') res.value_after = short(el.value, 80);
         return res;
+      }
+      if (op === 'upload') {
+        if (el.tagName !== 'INPUT' || (el.type || '').toLowerCase() !== 'file')
+          return err('NOT_FILE_INPUT', describe(el) + ' is not an input[type=file]. Use the ref of the file input (snapshot lists hidden ones too).', { element: describe(el) });
+        if (isDisabled(el)) return err('ELEMENT_DISABLED', describe(el) + ' is disabled.', { element: describe(el) });
+        const spec = JSON.parse(arg);
+        if (spec.length > 1 && !el.multiple) return err('NOT_MULTIPLE', describe(el) + ' accepts a single file.', { element: describe(el) });
+        const dt = new DataTransfer();
+        for (const f of spec) {
+          const bin = atob(f.b64), u8 = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+          dt.items.add(new File([u8], f.name, { type: f.type }));
+        }
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, element: describe(el), files: spec.map((f) => f.name) };
       }
       if (op === 'submit') {
         const form = el.tagName === 'FORM' ? el : (el.form || el.closest('form'));
