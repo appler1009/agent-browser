@@ -1,0 +1,51 @@
+name: Set up code signing
+description: >
+  Imports the Developer ID certificate into a temporary keychain and, if given, decodes the
+  App Store Connect API key for notarization (exported as ASC_KEY_PATH). Workflows should delete
+  the keychain and key afterwards (see the "Clean up signing" step).
+
+inputs:
+  certificate:
+    description: The Developer ID Application certificate and key as a base64-encoded .p12
+    required: true
+  certificate-password:
+    description: The .p12 password
+    required: true
+  keychain-password:
+    description: A password for the temporary keychain (any random string)
+    required: true
+  asc-key:
+    description: The App Store Connect API key (.p8), base64-encoded. Leave empty to skip notarization.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Import signing certificate
+      shell: bash
+      env:
+        MACOS_CERTIFICATE: ${{ inputs.certificate }}
+        MACOS_CERTIFICATE_PWD: ${{ inputs.certificate-password }}
+        KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+      run: |
+        KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+        CERT_PATH="$RUNNER_TEMP/certificate.p12"
+        echo "$MACOS_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+        rm -f "$CERT_PATH"
+
+    - name: Decode App Store Connect API key
+      if: ${{ inputs.asc-key != '' }}
+      shell: bash
+      env:
+        ASC_KEY_P8: ${{ inputs.asc-key }}
+      run: |
+        echo "$ASC_KEY_P8" | base64 --decode -o "$RUNNER_TEMP/asc-key.p8"
+        echo "ASC_KEY_PATH=$RUNNER_TEMP/asc-key.p8" >> "$GITHUB_ENV"

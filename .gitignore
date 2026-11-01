@@ -1,3 +1,11 @@
 .build/
+.swiftpm/
+.DS_Store
+dist/
+
+# Personal signing configuration (team ID, certificate hash); see Scripts/package.sh.
+.signing.local
+
+# Screenshots from local runs (the test fixtures keep theirs)
 *.png
 !Tests/**/*.png
