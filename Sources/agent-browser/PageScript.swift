@@ -60,16 +60,27 @@ let pageScript = #"""
   window.addEventListener('unhandledrejection', (e) => {
     post({ type: 'page-error', message: 'unhandledrejection: ' + short((e.reason && e.reason.message) || e.reason, 300) });
   });
-  document.addEventListener('submit', (e) => {
+  const onSubmit = (e) => {
     const f = e.target;
     setTimeout(() => post({
       type: 'form-submit', action: f.getAttribute && f.getAttribute('action'),
       method: ((f.method) || 'get').toLowerCase(), handled_by_page: e.defaultPrevented
     }), 0);
-  }, true);
+  };
+  document.addEventListener('submit', onSubmit, true);
+  // Same-origin iframe documents get the same change/submit tracking once the snapshot has walked them.
+  const watched = new WeakSet();
+  function watchDoc(d) {
+    if (watched.has(d)) return;
+    watched.add(d);
+    try {
+      new MutationObserver((m) => { API.mut += m.length; }).observe(d, { subtree: true, childList: true, attributes: true, characterData: true });
+      d.addEventListener('submit', onSubmit, true);
+    } catch (e) {}
+  }
 
   // ---- helpers -----------------------------------------------------------
-  const cs = (el) => getComputedStyle(el);
+  const cs = (el) => ((el.ownerDocument && el.ownerDocument.defaultView) || window).getComputedStyle(el);
   const SKIP = new Set(['script', 'style', 'noscript', 'template', 'head', 'meta', 'link', 'svg', 'canvas']);
 
   function isHidden(el) {
@@ -194,32 +205,46 @@ let pageScript = #"""
   }
   // Returns {x,y} of a click point if the element is the top element there, else an error descriptor.
   function hitTest(el) {
+    const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
     const r = el.getBoundingClientRect();
-    const l = Math.max(r.left, 0), rr = Math.min(r.right, innerWidth);
-    const t = Math.max(r.top, 0), b = Math.min(r.bottom, innerHeight);
+    const l = Math.max(r.left, 0), rr = Math.min(r.right, win.innerWidth);
+    const t = Math.max(r.top, 0), b = Math.min(r.bottom, win.innerHeight);
     if (!(rr > l) || !(b > t)) return { offscreen: true };
     const x = (l + rr) / 2, y = (t + b) / 2;
     const root = el.getRootNode();
-    const hit = (root.elementFromPoint ? root : document).elementFromPoint(x, y);
+    const hit = (root.elementFromPoint ? root : el.ownerDocument).elementFromPoint(x, y);
     if (!hit) return { offscreen: true };
     if (!related(el, hit)) return { covered_by: describe(hit), x, y };
     return { x, y };
   }
 
   // ---- snapshot ----------------------------------------------------------
-  API.snapshot = function (id) {
+  API.snapshot = function (id, opts) {
+    opts = opts || {};
+    const t0 = performance.now();
     API.snap = id;
     API.map = new Map();
     const lines = [];
-    let n = 0, count = 0, truncated = false;
-    const MAX = 1500;
+    let n = 0, count = 0, chars = 0, truncated = false;
+    const MAX = opts.maxNodes || 1500, MAXCH = opts.maxChars || 0, onlyInteractive = !!opts.interactive;
+    let scope = document.body || document.documentElement;
+    if (opts.selector) {
+      try { scope = document.querySelector(opts.selector); } catch (e) { return { error: 'invalid selector: ' + (e.message || e) }; }
+      if (!scope) return { error: 'selector matched nothing: ' + opts.selector };
+    }
     const prefix = '@s' + API.snap + ':e';
-    function emit(depth, text) {
-      if (count++ >= MAX) { truncated = true; return; }
-      lines.push('  '.repeat(depth) + text);
+    // Returns whether the line was added; a ref is only assigned when its line made it into the output.
+    function emit(depth, text, always) {
+      if (onlyInteractive && !always) return false;
+      if (truncated) return false;
+      const line = '  '.repeat(onlyInteractive ? 0 : depth) + text;
+      if (count >= MAX || (MAXCH && chars + line.length + 1 > MAXCH)) { truncated = true; return false; }
+      count++; chars += line.length + 1;
+      lines.push(line);
+      return true;
     }
     function children(node) {
-      if (node.shadowRoot) return Array.from(node.shadowRoot.childNodes);
+      if (node.shadowRoot) { watchDoc(node.shadowRoot); return Array.from(node.shadowRoot.childNodes); }
       if (node.tagName === 'SLOT') return node.assignedNodes({ flatten: true });
       return Array.from(node.childNodes);
     }
@@ -240,12 +265,12 @@ let pageScript = #"""
       if (kind) {
         const hiddenFile = role === 'file-input' && isHidden(node);
         if (isHidden(node) && !hiddenFile) return;
-        const ref = prefix + (++n);
-        API.map.set(n, node);
+        const ref = prefix + (n + 1);
         const st = stateOf(node);
         if (hiddenFile) st.push('hidden');
         const r = node.getBoundingClientRect();
-        const inView = r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+        const win = node.ownerDocument.defaultView || window;
+        const inView = r.bottom > 0 && r.top < win.innerHeight && r.right > 0 && r.left < win.innerWidth;
         if (hiddenFile) { /* not rendered: no position to check */ }
         else if (inView) {
           const h = hitTest(node);
@@ -254,7 +279,7 @@ let pageScript = #"""
         let line = (kind === 'clickable' && !role ? 'clickable' : role) + ' "' + nameOf(node) + '" ' + ref;
         if (tag === 'a') line += ' href="' + short(node.getAttribute('href'), 80) + '"';
         if (st.length) line += ' [' + st.join(', ') + ']';
-        emit(depth, line);
+        if (emit(depth, line, true)) { n++; API.map.set(n, node); }
         return;
       }
       if (role === 'heading') {
@@ -263,7 +288,17 @@ let pageScript = #"""
         return;
       }
       if (role === 'img') { const a = short(node.alt, 80); if (a) emit(depth, 'img "' + a + '"'); return; }
-      if (role === 'iframe') { emit(depth, 'iframe "' + short(node.title || node.getAttribute('src'), 80) + '" (contents not included)'); return; }
+      if (role === 'iframe') {
+        let d = null;
+        try { d = node.contentDocument; } catch (e) {}
+        const label = short(node.title || node.getAttribute('name') || node.getAttribute('src') || '', 80);
+        if (d && d.body) {
+          watchDoc(d);
+          emit(depth, 'iframe "' + label + '"');
+          visit(d.body, depth + 1);
+        } else emit(depth, 'iframe "' + label + '" (cross-origin: contents not included)');
+        return;
+      }
       if (tag === 'label' && node.control) return; // its text is the control's name
       let d = depth;
       const landmark = role && ['navigation', 'main', 'form', 'dialog', 'banner', 'contentinfo', 'complementary', 'alert', 'alertdialog', 'region'].includes(role);
@@ -274,11 +309,13 @@ let pageScript = #"""
       }
       for (const c of children(node)) visit(c, d);
     }
-    visit(document.body || document.documentElement, 0);
+    visit(scope, 0);
+    const tree = lines.join('\n');
     return {
       snapshot: API.snap, url: location.href, title: document.title,
       viewport: { w: innerWidth, h: innerHeight }, scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
-      refs: n, truncated: truncated, tree: lines.join('\n')
+      refs: n, truncated: truncated, tree: tree, chars: tree.length, approx_tokens: Math.ceil(tree.length / 4),
+      ms: Math.round(performance.now() - t0)
     };
   };
 
@@ -315,7 +352,7 @@ let pageScript = #"""
     if (isHidden(el)) return err('ELEMENT_HIDDEN', describe(el) + ' is not visible (display:none, visibility:hidden, opacity:0 or zero size).', { element: describe(el) });
     if (isDisabled(el)) return err('ELEMENT_DISABLED', describe(el) + ' is disabled.', { element: describe(el) });
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    if (API.watch) highlight(el);
+    if (API.watch && el.ownerDocument === document) highlight(el);
     const h = hitTest(el);
     if (h.offscreen) return err('OFFSCREEN', describe(el) + ' could not be scrolled into the viewport.', { element: describe(el) });
     if (h.covered_by) return err('ELEMENT_COVERED', describe(el) + ' is covered by ' + h.covered_by + ' at (' + Math.round(h.x) + ',' + Math.round(h.y) + ').',

@@ -252,7 +252,10 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private(set) var downloadSeq = 0
     private var downloadByObject: [ObjectIdentifier: DownloadInfo] = [:]
 
-    static let viewport = NSSize(width: 1280, height: 800)
+    /// Page viewport in CSS pixels; changed by the `viewport` command.
+    nonisolated(unsafe) static var viewport = NSSize(width: 1280, height: 800)
+    private var userAgent: String?
+    private var blockRules: [(label: String, rule: [String: Any])] = []
 
     /// Stable store id derived from the profile name, so the same name always reopens the same data.
     private static func storeID(for profile: String) -> UUID {
@@ -269,7 +272,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         } else {
             config.websiteDataStore = .nonPersistent()  // temporary profile
         }
-        config.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"
+        config.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"  // Safari-like, so sites serve normal pages
         let ucc = WKUserContentController()
         config.userContentController = ucc
         configuration = config
@@ -291,6 +294,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     func openTab(configuration config: WKWebViewConfiguration? = nil, attach: Bool = true) -> Tab {
         let tab = Tab(id: "t\(nextTabId)", configuration: config ?? configuration.copy() as! WKWebViewConfiguration, browser: self)
         nextTabId += 1
+        if let ua = userAgent { tab.webView.customUserAgent = ua }
         tabs.append(tab)
         current = tab
         if attach { watch.attach(tab.webView) }
@@ -530,7 +534,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private func run(_ cmd: String, _ args: [String: Any]) async throws -> [String: Any] {
         switch cmd {
         case "open": return try await open(args)
-        case "snapshot": return try await snapshot()
+        case "snapshot": return try await snapshot(args)
         case "click": return try await act("click", ref: try str(args, "ref"), arg: "")
         case "fill": return try await act("fill", ref: try str(args, "ref"), arg: try str(args, "text"))
         case "submit": return try await act("submit", ref: try str(args, "ref"), arg: "")
@@ -544,6 +548,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "storage": return try await storage(args)
         case "status": return await status()
         case "cdp": return try cdpCommand(args)
+        case "viewport": return try await viewportCommand(args)
+        case "useragent": return try await userAgentCommand(args)
+        case "block": return try await blockCommand(args)
         case "watch": return try watchCommand(args)
         case "close":
             let sock = daemonSocketPath
@@ -588,6 +595,63 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "status": return c.status()
         default: throw CmdError(code: "USAGE", message: "cdp takes start [--port N] | stop | status")
         }
+    }
+
+    // MARK: viewport, user agent, content blocking
+
+    private func viewportCommand(_ args: [String: Any]) async throws -> [String: Any] {
+        if let w = args["width"] as? Double, let h = args["height"] as? Double {
+            guard (200...4000).contains(w), (200...4000).contains(h) else {
+                throw CmdError(code: "USAGE", message: "viewport width and height must be between 200 and 4000")
+            }
+            Browser.viewport = NSSize(width: w.rounded(), height: h.rounded())
+            for t in tabs { t.webView.frame = NSRect(origin: .zero, size: Browser.viewport) }
+            watch.relayout()
+            try? await Task.sleep(nanoseconds: 150_000_000)  // let the page see the resize
+        }
+        return ["width": Int(Browser.viewport.width), "height": Int(Browser.viewport.height)]
+    }
+
+    private func userAgentCommand(_ args: [String: Any]) async throws -> [String: Any] {
+        if let ua = args["userAgent"] as? String {
+            userAgent = ua == "reset" || ua.isEmpty ? nil : ua
+            for t in tabs { t.webView.customUserAgent = userAgent }
+        }
+        let effective = (try? await js("return navigator.userAgent") as? String) ?? ""
+        return ["userAgent": effective, "custom": userAgent != nil, "applies_to": "pages loaded from now on"]
+    }
+
+    private func blockCommand(_ args: [String: Any]) async throws -> [String: Any] {
+        let resourceTypes = ["images": "image", "media": "media", "fonts": "font", "scripts": "script", "styles": "style-sheet"]
+        switch args["action"] as? String ?? "status" {
+        case "clear": blockRules = []
+        case "status": break
+        case "url":
+            guard let re = args["pattern"] as? String, !re.isEmpty else { throw CmdError(code: "USAGE", message: "block url needs a regex") }
+            blockRules.append(("url \(re)", ["trigger": ["url-filter": re], "action": ["type": "block"]]))
+        case let kind where resourceTypes[kind] != nil:
+            if !blockRules.contains(where: { $0.label == kind }) {
+                blockRules.append((kind, ["trigger": ["url-filter": ".*", "resource-type": [resourceTypes[kind]!]], "action": ["type": "block"]]))
+            }
+        default:
+            throw CmdError(code: "USAGE", message: "block takes images|media|fonts|scripts|styles | url <regex> | clear | status")
+        }
+        let ucc = configuration.userContentController
+        ucc.removeAllContentRuleLists()
+        if blockRules.isEmpty {
+            try? await WKContentRuleListStore.default().removeContentRuleList(forIdentifier: "agent-browser")
+        } else {
+            let json = String(data: try JSONSerialization.data(withJSONObject: blockRules.map(\.rule)), encoding: .utf8) ?? "[]"
+            do {
+                if let list = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "agent-browser", encodedContentRuleList: json) {
+                    ucc.add(list)
+                }
+            } catch {
+                blockRules.removeLast()
+                throw CmdError(code: "BAD_RULE", message: "rule rejected by WebKit: \(error.localizedDescription)")
+            }
+        }
+        return ["blocking": blockRules.map(\.label), "applies_to": "requests made from now on (reload to apply to the current page)"]
     }
 
     private func watchCommand(_ args: [String: Any]) throws -> [String: Any] {
@@ -640,13 +704,18 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return out
     }
 
-    private func snapshot() async throws -> [String: Any] {
+    private func snapshot(_ args: [String: Any] = [:]) async throws -> [String: Any] {
         if navInFlight { _ = await waitForNavigation(timeout: 15) }
         // Snapshot ids are unique across tabs, so a ref from another tab can never match this one.
         snapCounter += 1
-        guard var r = try await js("return window.__abApi.snapshot(id)", ["id": snapCounter]) as? [String: Any] else {
+        var opts: [String: Any] = [:]
+        if args["interactive"] as? Bool == true { opts["interactive"] = true }
+        for k in ["maxChars", "maxNodes"] { if let v = args[k] as? Double, v > 0 { opts[k] = v } }
+        if let sel = args["selector"] as? String, !sel.isEmpty { opts["selector"] = sel }
+        guard var r = try await js("return window.__abApi.snapshot(id, opts)", ["id": snapCounter, "opts": opts]) as? [String: Any] else {
             throw CmdError(code: "SNAPSHOT_FAILED", message: "no page is open; run open <url> first")
         }
+        if let e = r["error"] as? String { throw CmdError(code: "BAD_SELECTOR", message: e) }
         r["tab"] = current.id
         return r
     }

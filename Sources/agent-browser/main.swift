@@ -6,7 +6,8 @@ signal(SIGPIPE, SIG_IGN)
 let usage = """
 usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   open <url> [--timeout MS]        navigate (starts the background helper on first use)
-  snapshot [--text]                accessibility-style tree with refs like @s1:e3
+  snapshot [--text] [--interactive] [--max-chars N] [--max-nodes N] [--selector CSS]
+                                   accessibility-style tree with refs like @s1:e3; the flags cap its size (tokens)
   click <ref>
   fill <ref> <text...>
   submit <ref>                     ref may be the form or any control inside it
@@ -17,6 +18,9 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   downloads                        files saved from downloads (also reported as an action's outcome)
   cookies export [file] | import <file> | clear
   storage export [file] | import <file>      localStorage/sessionStorage of the current origin
+  viewport [W H]                   page size in CSS pixels (default 1280 800)
+  useragent <string...>|reset      user agent for pages loaded from now on
+  block images|media|fonts|scripts|styles | url <regex> | clear | status   content blocking for new requests
   status                           session, profile, tabs
   cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
@@ -85,7 +89,7 @@ func absolutePath(_ p: String) -> String {
 func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
     var positional: [String] = []
     var flags: [String: String] = [:]
-    let boolFlags: Set<String> = cmd == "snapshot" ? ["text"] : ["load", "idle", "download"]
+    let boolFlags: Set<String> = cmd == "snapshot" ? ["text", "interactive"] : ["load", "idle", "download"]
     var i = 0
     while i < rest.count {
         let a = rest[i]
@@ -111,8 +115,27 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         needPositional(1, "<url>")
         args["url"] = positional[0]
         if let t = num("timeout") { args["timeout"] = t / 1000 }
-    case "snapshot", "close", "tabs", "downloads", "status":
+    case "close", "tabs", "downloads", "status":
         break
+    case "snapshot":
+        if flags["interactive"] != nil { args["interactive"] = true }
+        if let v = num("max-chars") { args["maxChars"] = v }
+        if let v = num("max-nodes") { args["maxNodes"] = v }
+        if let v = flags["selector"] { args["selector"] = v }
+    case "viewport":
+        let dims = positional.flatMap { $0.lowercased().split(separator: "x").map(String.init) }
+        if !dims.isEmpty {
+            guard dims.count == 2, let w = Double(dims[0]), let h = Double(dims[1]) else { fail("USAGE", "viewport takes <width> <height> (or WxH)") }
+            args["width"] = w
+            args["height"] = h
+        }
+    case "useragent":
+        needPositional(1, "<string>|reset")
+        args["userAgent"] = positional.joined(separator: " ")
+    case "block":
+        needPositional(1, "images|media|fonts|scripts|styles | url <regex> | clear | status")
+        args["action"] = positional[0]
+        if positional[0] == "url" { needPositional(2, "<regex>"); args["pattern"] = positional[1] }
     case "click", "submit":
         needPositional(1, "<ref>")
         args["ref"] = positional[0]
@@ -183,6 +206,10 @@ if cmd == "daemon" {
 }
 if cmd == "mcp" {
     runMCP(session: session, profile: profile)
+}
+if cmd == "--version" || cmd == "-v" || cmd == "version" {
+    print("agent-browser \(agentBrowserVersion)")
+    exit(0)
 }
 if cmd == "--help" || cmd == "-h" || cmd == "help" {
     print(usage)

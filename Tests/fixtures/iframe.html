@@ -1,0 +1,7 @@
+<!doctype html><html><head><title>Frames</title></head><body>
+<h1>Frames</h1>
+<iframe id="f" title="inner"></iframe>
+<iframe id="x" title="other origin" src="done.html?user=x"></iframe>
+<script>
+document.getElementById('f').srcdoc = '<input aria-label="Inner name"><button onclick="document.getElementById(\'o\').textContent=\'inner clicked\'">Inner go</button><p id="o"></p>';
+</script></body></html>

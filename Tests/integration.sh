@@ -190,7 +190,7 @@ OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has all 17 tools" '.result.tools|length==17' "$(line 2)"
+check "mcp tools/list has all 20 tools" '.result.tools|length==20' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
 check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
 MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
@@ -205,6 +205,53 @@ check "mcp screenshot returns an image" '.result.content[0].type=="image" and (.
 check "mcp browser_tabs works" '.result.isError==false and (.result.content[0].text|test("t1"))' "$(line 8)"
 check "mcp unknown method -> JSON-RPC error" '.error.code==-32601' "$(line 9)"
 
+# --- polish: iframes, shadow DOM, blocking, UA/viewport, snapshot budgets ----------
+ab open "file://$FIX/iframe.html" >/dev/null; sleep 0.5
+T=$(ab snapshot | jq -r .result.tree)
+echo "$T" | grep -q 'iframe "inner"' && echo "$T" | grep -q 'textbox "Inner name"' && echo "$T" | grep -q 'button "Inner go"' \
+  && { PASS=$((PASS+1)); echo "ok   - same-origin iframe contents appear in the snapshot"; } || { FAIL=$((FAIL+1)); echo "FAIL - iframe contents"; echo "$T"; }
+echo "$T" | grep -q 'other origin.*cross-origin: contents not included' && { PASS=$((PASS+1)); echo "ok   - cross-origin iframe is reported, not silently skipped"; } || { FAIL=$((FAIL+1)); echo "FAIL - cross-origin iframe note"; echo "$T"; }
+IN=$(ref "$T" 'textbox "Inner name"'); IG=$(ref "$T" 'button "Inner go"')
+R=$(ab fill "$IN" hello);                         check "fill inside an iframe" '.ok and .result.value=="hello"' "$R"
+R=$(ab click "$IG");                              check "click inside an iframe changes its document (dom-changed)" '.ok and .result.outcome=="dom-changed"' "$R"
+ab snapshot --text | grep -q 'inner clicked' && { PASS=$((PASS+1)); echo "ok   - iframe click had its effect"; } || { FAIL=$((FAIL+1)); echo "FAIL - iframe click effect"; }
+
+ab open "file://$FIX/shadow.html" >/dev/null
+T=$(ab snapshot | jq -r .result.tree); SG=$(ref "$T" 'button "Shadow go"')
+[ -n "$SG" ] && { PASS=$((PASS+1)); echo "ok   - open shadow root content is in the snapshot"; } || { FAIL=$((FAIL+1)); echo "FAIL - shadow content"; echo "$T"; }
+R=$(ab click "$SG");                              check "click inside a shadow root reports dom-changed" '.ok and .result.outcome=="dom-changed"' "$R"
+
+ab open "file://$FIX/block.html" >/dev/null; sleep 0.3
+ab snapshot --text | grep -q 'img: loaded' && { PASS=$((PASS+1)); echo "ok   - image loads by default"; } || { FAIL=$((FAIL+1)); echo "FAIL - image default"; }
+R=$(ab block images);                             check "block images" '.ok and (.result.blocking==["images"])' "$R"
+ab open "file://$FIX/block.html" >/dev/null; sleep 0.3
+ab snapshot --text | grep -q 'img: blocked' && { PASS=$((PASS+1)); echo "ok   - images are blocked after block images"; } || { FAIL=$((FAIL+1)); echo "FAIL - image not blocked"; }
+R=$(ab block clear);                              check "block clear" '.ok and (.result.blocking|length==0)' "$R"
+ab open "file://$FIX/block.html" >/dev/null; sleep 0.3
+ab snapshot --text | grep -q 'img: loaded' && { PASS=$((PASS+1)); echo "ok   - images load again after block clear"; } || { FAIL=$((FAIL+1)); echo "FAIL - image after clear"; }
+R=$(ab block url 'pixel\.png');                   check "block url regex" '.ok and (.result.blocking|length==1)' "$R"
+ab open "file://$FIX/block.html" >/dev/null; sleep 0.3
+ab snapshot --text | grep -q 'img: blocked' && { PASS=$((PASS+1)); echo "ok   - url rule blocks the matching request"; } || { FAIL=$((FAIL+1)); echo "FAIL - url rule"; }
+ab block clear >/dev/null
+R=$(ab block nonsense);                           check "block rejects unknown kinds" '.ok==false and .error.code=="USAGE"' "$R"
+
+R=$(ab useragent "custom-bot/9.9");               check "useragent set" '.ok and .result.custom==true' "$R"
+ab open "file://$FIX/ua.html" >/dev/null
+ab snapshot --text | grep -q 'ua: custom-bot/9.9' && { PASS=$((PASS+1)); echo "ok   - page sees the custom user agent"; } || { FAIL=$((FAIL+1)); echo "FAIL - page UA"; }
+ab useragent reset >/dev/null
+R=$(ab viewport 600 400);                         check "viewport set" '.ok and .result.width==600 and .result.height==400' "$R"
+ab open "file://$FIX/ua.html" >/dev/null
+ab snapshot --text | grep -q 'size: 600x400' && { PASS=$((PASS+1)); echo "ok   - page sees the 600x400 viewport"; } || { FAIL=$((FAIL+1)); echo "FAIL - page viewport"; }
+R=$(ab viewport 50 50);                           check "viewport rejects tiny sizes" '.ok==false and .error.code=="USAGE"' "$R"
+ab viewport 1280 800 >/dev/null
+
+ab open "file://$FIX/big.html" >/dev/null
+R=$(ab snapshot);                                 check "huge page: capped at 1500 nodes, truncated flag, reports ms and size" '.result.truncated==true and (.result.ms|type=="number") and .result.approx_tokens>1000' "$R"
+R=$(ab snapshot --max-chars 2000);                check "--max-chars budget is respected" '.result.truncated==true and .result.chars<=2000' "$R"
+R=$(ab snapshot --interactive --max-nodes 50);    check "--interactive lists only actionable elements" '(.result.tree|contains("text \"")|not) and .result.refs==50' "$R"
+R=$(ab snapshot --selector '#only');              check "--selector scopes to a subtree" '.result.refs==1 and (.result.tree|contains("Only one"))' "$R"
+R=$(ab snapshot --selector '#nope');              check "--selector with no match is an error" '.ok==false and .error.code=="BAD_SELECTOR"' "$R"
+
 # --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then
   CDPINFO=$(ab cdp start)
@@ -215,7 +262,7 @@ if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(
   [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://evil.example' "$HTTP/json/version")" = "403" ] && { PASS=$((PASS+1)); echo "ok   - browser-origin requests are rejected (403)"; } || { FAIL=$((FAIL+1)); echo "FAIL - Origin header not rejected"; }
   [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "$HTTP/json/version")" = "403" ] && { PASS=$((PASS+1)); echo "ok   - non-local Host header is rejected (403)"; } || { FAIL=$((FAIL+1)); echo "FAIL - Host header not rejected"; }
   R=$(timeout 60 node "$HERE/cdp/raw.mjs" "$WSURL" "$FIX" 2>&1 | tail -1)
-  check "cdp: version, targets, attach" '.version=="agent-browser/0.1" and .pageTargets>=1 and .attached' "$R"
+  check "cdp: version, targets, attach" '(.version|startswith("agent-browser/")) and .pageTargets>=1 and .attached' "$R"
   check "cdp: Page.navigate emits frameNavigated, lifecycle and load" '.navigateHasLoader and .loadEvent and .frameNavigated and (.lifecycle|index("load")!=null and index("DOMContentLoaded")!=null)' "$R"
   check "cdp: Runtime.evaluate values, promises and exceptions" '.sum==3 and .title=="Login" and .promise==42 and .exception=="Error: boom"' "$R"
   check "cdp: remote objects and callFunctionOn" '.h1Subtype=="node" and .callFunctionOn=="Sign in"' "$R"

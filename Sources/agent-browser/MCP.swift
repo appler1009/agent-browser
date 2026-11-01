@@ -22,7 +22,10 @@ private let sRef: [String: Any] = ["type": "string", "description": "Ref from th
 private let mcpTools: [[String: Any]] = [
     tool("browser_open", "Navigate to a URL (https:// is assumed if missing). Starts the browser on first use.",
          ["url": ["type": "string"], "timeout_ms": ["type": "number", "description": "default 30000"]], required: ["url"]),
-    tool("browser_snapshot", "Accessibility-style tree of the page with refs for interactive elements. Flags covered, offscreen and disabled elements."),
+    tool("browser_snapshot", "Accessibility-style tree of the page with refs for interactive elements. Flags covered, offscreen and disabled elements. Same-origin iframes and open shadow roots are included. Use the options to keep large pages cheap.",
+         ["interactive": ["type": "boolean", "description": "only elements you can act on (no text/headings); smallest output"],
+          "max_chars": ["type": "number", "description": "stop at roughly this many characters (~4 per token); result says truncated"],
+          "selector": ["type": "string", "description": "only the subtree matching this CSS selector"]]),
     tool("browser_click", "Click an element by ref. Errors if it is hidden, disabled or covered. Reports the outcome (navigated, dialog, dom-changed, no-op).",
          ["ref": sRef], required: ["ref"]),
     tool("browser_fill", "Replace the text of an input, textarea or contenteditable by ref.",
@@ -51,6 +54,13 @@ private let mcpTools: [[String: Any]] = [
     tool("browser_status", "Session, profile (null = temporary), tab count, watch state."),
     tool("browser_cdp", "Start/stop/inspect a thin Chrome DevTools Protocol endpoint on 127.0.0.1 (WebKit-backed; no request interception or browser contexts). Returns the http and ws URLs for tools like Puppeteer.",
          ["action": ["type": "string", "enum": ["start", "stop", "status"]], "port": ["type": "number", "description": "0 or omitted = pick a free port"]]),
+    tool("browser_viewport", "Get or set the page size in CSS pixels (200-4000). Omit width/height to read it.",
+         ["width": ["type": "number"], "height": ["type": "number"]]),
+    tool("browser_user_agent", "Set the user agent for pages loaded from now on, or 'reset'. Returns the effective navigator.userAgent.",
+         ["user_agent": ["type": "string"]], required: ["user_agent"]),
+    tool("browser_block", "Block requests: images|media|fonts|scripts|styles, or url with a regex, or clear/status. Applies to requests made from now on (reload to apply to the current page); saves bandwidth and tokens.",
+         ["action": ["type": "string", "enum": ["images", "media", "fonts", "scripts", "styles", "url", "clear", "status"]],
+          "pattern": ["type": "string", "description": "regex, for action=url"]], required: ["action"]),
     tool("browser_watch", "Show or hide the live watch window for the user. 'pause' hands control to the user; agent commands then wait until 'resume'.",
          ["mode": ["type": "string", "enum": ["on", "off", "pause", "resume", "status"]]], required: ["mode"]),
     tool("browser_close", "Stop the browser helper and discard its temporary profile."),
@@ -64,7 +74,21 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
         var args: [String: Any] = ["url": s("url")]
         if let t = n("timeout_ms") { args["timeout"] = t / 1000 }
         return ["cmd": "open", "args": args]
-    case "browser_snapshot": return ["cmd": "snapshot", "args": [:]]
+    case "browser_snapshot":
+        var args: [String: Any] = [:]
+        if a["interactive"] as? Bool == true { args["interactive"] = true }
+        if let v = n("max_chars") { args["maxChars"] = v }
+        if !s("selector").isEmpty { args["selector"] = s("selector") }
+        return ["cmd": "snapshot", "args": args]
+    case "browser_viewport":
+        var args: [String: Any] = [:]
+        if let w = n("width"), let h = n("height") { args["width"] = w; args["height"] = h }
+        return ["cmd": "viewport", "args": args]
+    case "browser_user_agent": return ["cmd": "useragent", "args": ["userAgent": s("user_agent")]]
+    case "browser_block":
+        var args: [String: Any] = ["action": s("action")]
+        if !s("pattern").isEmpty { args["pattern"] = s("pattern") }
+        return ["cmd": "block", "args": args]
     case "browser_click": return ["cmd": "click", "args": ["ref": s("ref")]]
     case "browser_fill": return ["cmd": "fill", "args": ["ref": s("ref"), "text": s("text")]]
     case "browser_submit": return ["cmd": "submit", "args": ["ref": s("ref")]]
@@ -157,7 +181,7 @@ func runMCP(session: String, profile: String? = nil) -> Never {
             send(["jsonrpc": "2.0", "id": id, "result": [
                 "protocolVersion": params["protocolVersion"] as? String ?? "2025-06-18",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "agent-browser", "version": "0.1.0"],
+                "serverInfo": ["name": "agent-browser", "version": agentBrowserVersion],
                 "instructions": mcpInstructions,
             ] as [String: Any]])
         case "ping":

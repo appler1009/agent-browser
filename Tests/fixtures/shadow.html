@@ -1,0 +1,11 @@
+<!doctype html><html><head><title>Shadow</title></head><body>
+<h1>Shadow</h1>
+<my-widget></my-widget>
+<script>
+class W extends HTMLElement { connectedCallback() {
+  const r = this.attachShadow({ mode: 'open' });
+  r.innerHTML = '<button id="b">Shadow go</button><p id="o"></p>';
+  r.getElementById('b').addEventListener('click', () => { r.getElementById('o').textContent = 'shadow clicked'; });
+} }
+customElements.define('my-widget', W);
+</script></body></html>

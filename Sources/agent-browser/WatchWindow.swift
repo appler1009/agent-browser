@@ -28,7 +28,7 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     private static let toolbarH: CGFloat = 34
     private static let timelineH: CGFloat = 150
-    private let vp = Browser.viewport
+    private var vp: NSSize { Browser.viewport }
 
     init(window: NSWindow, webView: WatchWebView, session: String) {
         self.window = window
@@ -79,6 +79,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         webHolder.addSubview(wv)
         wv.frame = NSRect(origin: .zero, size: vp)
     }
+
+    /// Re-applies the layout after the viewport size changed.
+    func relayout() { if visible { show() } else { hide() } }
 
     // MARK: show / hide
 

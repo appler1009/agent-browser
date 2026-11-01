@@ -1,0 +1,10 @@
+<!doctype html><html><head><title>Big</title></head><body>
+<section id="only"><button>Only one</button></section>
+<script>
+const d = document.createDocumentFragment();
+for (let i = 0; i < 3000; i++) {
+  const p = document.createElement('p'); p.textContent = 'Row ' + i + ' some filler text'; d.appendChild(p);
+  const b = document.createElement('button'); b.textContent = 'Item ' + i; d.appendChild(b);
+}
+document.body.appendChild(d);
+</script></body></html>

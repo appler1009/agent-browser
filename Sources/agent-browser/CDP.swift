@@ -10,7 +10,7 @@ struct CDPError: Error {
     var message: String
 }
 
-private let cdpUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 agent-browser/0.1"
+private let cdpUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15 agent-browser/\(agentBrowserVersion)"
 
 @MainActor
 final class CDP {
@@ -102,7 +102,7 @@ final class CDP {
         let query = parts.count > 1 ? parts[1] : ""
         switch route {
         case "/json/version":
-            return (200, json(["Browser": "agent-browser/0.1", "Protocol-Version": "1.3", "User-Agent": cdpUserAgent,
+            return (200, json(["Browser": "agent-browser/\(agentBrowserVersion)", "Protocol-Version": "1.3", "User-Agent": cdpUserAgent,
                                "V8-Version": "", "WebKit-Version": "605.1.15",
                                "webSocketDebuggerUrl": "ws://\(host)/devtools/browser/\(browserId)"]))
         case "/json", "/json/list":
@@ -408,7 +408,7 @@ final class CDP {
         switch method {
         // ---- Browser
         case "Browser.getVersion":
-            return ["protocolVersion": "1.3", "product": "agent-browser/0.1", "revision": "", "userAgent": cdpUserAgent, "jsVersion": "JavaScriptCore"]
+            return ["protocolVersion": "1.3", "product": "agent-browser/\(agentBrowserVersion)", "revision": "", "userAgent": cdpUserAgent, "jsVersion": "JavaScriptCore"]
         case "Browser.close":
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { if !daemonSocketPath.isEmpty { unlink(daemonSocketPath) }; exit(0) }
             return [:]
