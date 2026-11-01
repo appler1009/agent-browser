@@ -53,8 +53,13 @@ final class DownloadInfo {
 @MainActor
 final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     let id: String
+    /// Stable DevTools target id (32 hex chars, like Chrome's).
+    let targetId = UUID().uuidString.replacingOccurrences(of: "-", with: "")
     let webView: WatchWebView
     unowned let browser: Browser
+    var committedCount = 0
+    var lastFailure: String?
+    var lastMime = ""
     var navInFlight = false
     var navCount = 0
     var lastStatus: Int?
@@ -90,6 +95,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard navigationResponse.isForMainFrame else { return decisionHandler(.allow) }
         let http = navigationResponse.response as? HTTPURLResponse
         if let http { lastStatus = http.statusCode }
+        lastMime = navigationResponse.response.mimeType ?? ""
         let attachment = http?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased().hasPrefix("attachment") ?? false
         decisionHandler(attachment || !navigationResponse.canShowMIMEType ? .download : .allow)
     }
@@ -104,7 +110,13 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navInFlight = true
+        lastFailure = nil
         dlSeqAtStart = browser.downloadSeq
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        committedCount += 1
+        browser.notify("commit", ["url": webView.url?.absoluteString ?? ""], tab: self)
     }
 
     func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
@@ -140,6 +152,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     private func reportFailure(_ error: Error) {
+        lastFailure = error.localizedDescription
         browser.log("navigation-failed", ["error": error.localizedDescription], tab: self)
         finishNavigation(.failed(error.localizedDescription))
     }
@@ -228,6 +241,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var busy = false
     private var lockWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var lastActivity = Date()
+    func touch() { lastActivity = Date() }
+
+    /// DevTools shim hook: sees every logged event plus CDP-only notifications (commit, cdp:net, target-*).
+    var cdpObserver: ((String, [String: Any], Tab?) -> Void)?
+    private var cdp: CDP?
+    var cookieStore: WKHTTPCookieStore { configuration.websiteDataStore.httpCookieStore }
 
     private(set) var downloads: [DownloadInfo] = []
     private(set) var downloadSeq = 0
@@ -275,7 +294,33 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         tabs.append(tab)
         current = tab
         if attach { watch.attach(tab.webView) }
+        notify("target-created", [:], tab: tab)
         return tab
+    }
+
+    func activate(_ tab: Tab) { switchTo(tab) }
+
+    /// Closes a tab; the only remaining tab is blanked instead (a session always has one page).
+    func closeTab(_ t: Tab) {
+        if tabs.count > 1, let i = tabs.firstIndex(where: { $0 === t }) { removeTab(at: i) }
+        else { t.webView.load(URLRequest(url: URL(string: "about:blank")!)) }
+    }
+
+    /// Evaluates JS in a specific tab's page world (the CLI commands use `js`, which targets the current tab).
+    func eval(on tab: Tab, _ body: String, _ args: [String: Any] = [:]) async throws -> Any? {
+        do {
+            return try await tab.webView.callAsyncJavaScript(body, arguments: args, in: nil, contentWorld: .page)
+        } catch {
+            throw CmdError(code: "EVAL_FAILED", message: error.localizedDescription)
+        }
+    }
+
+    /// Scripts run at document start in every page (Page.addScriptToEvaluateOnNewDocument).
+    func setInitScripts(_ sources: [String]) {
+        let ucc = configuration.userContentController
+        ucc.removeAllUserScripts()
+        ucc.addUserScript(WKUserScript(source: pageScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        for src in sources { ucc.addUserScript(WKUserScript(source: src, injectionTime: .atDocumentStart, forMainFrameOnly: true)) }
     }
 
     private func switchTo(_ tab: Tab) {
@@ -289,6 +334,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     }
 
     private func removeTab(at i: Int) {
+        notify("target-closed", [:], tab: tabs[i])
         let t = tabs.remove(at: i)
         t.webView.removeFromSuperview()
         t.webView.navigationDelegate = nil
@@ -317,6 +363,13 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         e["t"] = Int(Date().timeIntervalSince1970 * 1000)
         if let tab, tabs.count > 1 { e["tab"] = tab.id }
         events.append(e)
+        if events.count > 2000 { events.removeFirst(events.count - 2000) }  // nobody is draining (CDP-only use)
+        cdpObserver?(type, e, tab)
+    }
+
+    /// Reaches only DevTools clients, not the CLI's per-command event list.
+    func notify(_ type: String, _ fields: [String: Any] = [:], tab: Tab? = nil) {
+        cdpObserver?(type, fields, tab)
     }
 
     private func drainEvents() -> [[String: Any]] {
@@ -328,15 +381,15 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard var body = message.body as? [String: Any], let type = body.removeValue(forKey: "type") as? String else { return }
         let origin = tabs.first(where: { $0.webView === message.webView })
-        log(type, body.compactMapValues { $0 is NSNull ? nil : $0 }, tab: origin)
+        let fields = body.compactMapValues { $0 is NSNull ? nil : $0 }
+        if type.hasPrefix("cdp:") { notify(type, fields, tab: origin) } else { log(type, fields, tab: origin) }
     }
 
     // MARK: downloads
 
+    /// Where downloads are saved; created only when a download actually happens.
     private static var downloadDir: URL {
-        let u = URL(fileURLWithPath: NSHomeDirectory() + "/.agent-browser/downloads/\(sanitizeSession(daemonSession))")
-        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
-        return u
+        URL(fileURLWithPath: NSHomeDirectory() + "/.agent-browser/downloads/\(sanitizeSession(daemonSession))")
     }
 
     func adopt(_ download: WKDownload, from tab: Tab) {
@@ -354,6 +407,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         var name = (suggestedFilename as NSString).lastPathComponent
         if name.isEmpty || name == "." || name == ".." { name = "download" }
         let dir = Browser.downloadDir
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var dest = dir.appendingPathComponent(name)
         var n = 1
         let ext = (name as NSString).pathExtension, stem = (name as NSString).deletingPathExtension
@@ -489,6 +543,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "cookies": return try await cookies(args)
         case "storage": return try await storage(args)
         case "status": return await status()
+        case "cdp": return try cdpCommand(args)
         case "watch": return try watchCommand(args)
         case "close":
             let sock = daemonSocketPath
@@ -523,6 +578,17 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     }
 
     // MARK: commands
+
+    private func cdpCommand(_ args: [String: Any]) throws -> [String: Any] {
+        let c = cdp ?? CDP(browser: self)
+        cdp = c
+        switch args["action"] as? String ?? "start" {
+        case "start": return try c.start(port: UInt16((args["port"] as? Double) ?? 0))
+        case "stop": c.stop(); return ["running": false]
+        case "status": return c.status()
+        default: throw CmdError(code: "USAGE", message: "cdp takes start [--port N] | stop | status")
+        }
+    }
 
     private func watchCommand(_ args: [String: Any]) throws -> [String: Any] {
         switch args["mode"] as? String ?? "on" {
@@ -652,6 +718,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         guard let paths = args["paths"] as? [String], !paths.isEmpty else {
             throw CmdError(code: "USAGE", message: "upload needs at least one file path")
         }
+        let json = try filesSpec(paths)
+        return try await act("upload", ref: ref, arg: json)
+    }
+
+    /// JSON describing files (name, mime type, base64 bytes) for the page-side File constructor.
+    func filesSpec(_ paths: [String]) throws -> String {
         var files: [[String: Any]] = []
         var total = 0
         for p in paths {
@@ -670,8 +742,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             let mime = UTType(filenameExtension: (name as NSString).pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             files.append(["name": name, "type": mime, "b64": data.base64EncodedString()])
         }
-        let json = String(data: try JSONSerialization.data(withJSONObject: files), encoding: .utf8) ?? "[]"
-        return try await act("upload", ref: ref, arg: json)
+        return String(data: try JSONSerialization.data(withJSONObject: files), encoding: .utf8) ?? "[]"
     }
 
     // MARK: wait
@@ -787,7 +858,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
 
     // MARK: cookies and storage
 
-    private func cookieDict(_ c: HTTPCookie) -> [String: Any] {
+    func cookieDict(_ c: HTTPCookie) -> [String: Any] {
         var d: [String: Any] = ["name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
                                 "secure": c.isSecure, "httpOnly": c.isHTTPOnly]
         if let e = c.expiresDate { d["expires"] = e.timeIntervalSince1970 }
@@ -795,7 +866,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return d
     }
 
-    private func makeCookie(_ d: [String: Any]) -> HTTPCookie? {
+    func makeCookie(_ d: [String: Any]) -> HTTPCookie? {
         guard let name = d["name"] as? String, let value = d["value"] as? String, let domain = d["domain"] as? String else { return nil }
         var p: [HTTPCookiePropertyKey: Any] = [.name: name, .value: value, .domain: domain, .path: d["path"] as? String ?? "/"]
         if d["secure"] as? Bool == true { p[.secure] = "TRUE" }

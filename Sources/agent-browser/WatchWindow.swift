@@ -40,7 +40,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.hasShadow = false
         window.isExcludedFromWindowsMenu = true
-        window.collectionBehavior = [.stationary, .ignoresCycle, .transient]
+        // Present on every Space so WebKit never considers the page hidden (that would suspend
+        // requestAnimationFrame, visibility-driven code and IntersectionObserver).
+        window.collectionBehavior = [.stationary, .ignoresCycle, .transient, .canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentView = container
 
         webHolder.addSubview(webView)
@@ -90,6 +92,8 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.title = title
+        window.alphaValue = 1
+        window.level = .normal
         window.ignoresMouseEvents = false
         window.setContentSize(NSSize(width: w, height: h + chrome))
         container.frame = NSRect(x: 0, y: 0, width: w, height: h + chrome)
@@ -119,7 +123,12 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         webHolder.frame = NSRect(origin: .zero, size: vp)
         webHolder.bounds = NSRect(origin: .zero, size: vp)
         webView.frame = NSRect(origin: .zero, size: vp)
-        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        // Windowless: on a screen (so the page counts as visible and keeps rendering) but fully
+        // transparent, click-through and below normal windows. Nothing appears, nothing takes focus.
+        let origin = (NSScreen.main ?? NSScreen.screens.first)?.frame.origin ?? .zero
+        window.alphaValue = 0
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
+        window.setFrameOrigin(origin)
         window.orderBack(nil)
     }
 

@@ -16,7 +16,7 @@ check() { # name, jq-filter, json
 ref() { # tree, regex -> first ref on a line matching regex
   echo "$1" | grep -E "$2" | head -1 | grep -oE '@s[0-9]+:e[0-9]+' | head -1
 }
-trap 'ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION"' EXIT
+trap 'ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof"' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -59,7 +59,7 @@ AL=$(ref "$T" 'button "Alert"')
 R=$(ab click "$AL");                              check "dialog reported as outcome" '.ok and (.result.outcome=="dialog: alert(\"hello there\")")' "$R"
 
 # --- watch window -------------------------------------------------------
-winfo() { # on-screen window count owned by this session's helper
+winfo() { # windows of this helper that a person could see: on a screen and not fully transparent
   swift - "$1" <<'SW' 2>/dev/null
 import CoreGraphics
 import Foundation
@@ -67,9 +67,8 @@ let pid = Int32(CommandLine.arguments[1])!
 let l = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? []
 print(l.filter {
     guard ($0[kCGWindowOwnerPID as String] as? Int32) == pid, ($0[kCGWindowLayer as String] as? Int) == 0,
-          let b = $0[kCGWindowBounds as String] as? [String: Any], let x = b["X"] as? Double, let y = b["Y"] as? Double
-    else { return false }
-    return x > -5000 && y > -5000   // the windowless helper parks its window at (-30000,-30000)
+          let a = $0[kCGWindowAlpha as String] as? Double else { return false }
+    return a > 0   // the windowless helper keeps a fully transparent window so pages count as visible
 }.count)
 SW
 }
@@ -97,6 +96,14 @@ SHOT="${TMPDIR:-/tmp}/ab-itest-$$.png"
 R=$(ab screenshot "$SHOT");                       check "screenshot written" '.ok and .result.width>0' "$R"
 [ -s "$SHOT" ] && { PASS=$((PASS+1)); echo "ok   - png file exists"; } || { FAIL=$((FAIL+1)); echo "FAIL - png missing"; }
 rm -f "$SHOT"
+
+# --- rendering keeps running while windowless --------------------------
+ab watch off >/dev/null
+ab open "file://$FIX/raf.html" >/dev/null; sleep 1
+T=$(ab snapshot | jq -r .result.tree)
+echo "$T" | grep -q 'state: visible' && { PASS=$((PASS+1)); echo "ok   - windowless page is visibilityState=visible"; } || { FAIL=$((FAIL+1)); echo "FAIL - page considered hidden"; echo "$T"; }
+FR=$(echo "$T" | grep -oE 'frames: [0-9]+' | grep -oE '[0-9]+')
+[ "${FR:-0}" -gt 10 ] && { PASS=$((PASS+1)); echo "ok   - requestAnimationFrame keeps firing windowless ($FR frames)"; } || { FAIL=$((FAIL+1)); echo "FAIL - rAF stalled (frames=$FR)"; }
 
 # --- tabs ----------------------------------------------------------------
 ab open "file://$FIX/tabs.html" >/dev/null
@@ -183,7 +190,7 @@ OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has all 16 tools" '.result.tools|length==16' "$(line 2)"
+check "mcp tools/list has all 17 tools" '.result.tools|length==17' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
 check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
 MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
@@ -197,6 +204,28 @@ check "mcp stale ref is isError STALE_REF" '.result.isError==true and (.result.c
 check "mcp screenshot returns an image" '.result.content[0].type=="image" and (.result.content[0].data|length>1000)' "$(line 7)"
 check "mcp browser_tabs works" '.result.isError==false and (.result.content[0].text|test("t1"))' "$(line 8)"
 check "mcp unknown method -> JSON-RPC error" '.error.code==-32601' "$(line 9)"
+
+# --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------
+if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then
+  CDPINFO=$(ab cdp start)
+  check "cdp start returns loopback http and ws endpoints" '.ok and (.result.http|test("^http://127.0.0.1:[0-9]+$")) and (.result.ws|test("^ws://127.0.0.1:"))' "$CDPINFO"
+  HTTP=$(echo "$CDPINFO" | jq -r .result.http); WSURL=$(echo "$CDPINFO" | jq -r .result.ws)
+  check "/json/version advertises the websocket" '.webSocketDebuggerUrl|startswith("ws://127.0.0.1:")' "$(curl -s "$HTTP/json/version")"
+  check "/json/list lists pages with ws urls" 'length>=1 and (.[0].webSocketDebuggerUrl|test("/devtools/page/"))' "$(curl -s "$HTTP/json/list")"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://evil.example' "$HTTP/json/version")" = "403" ] && { PASS=$((PASS+1)); echo "ok   - browser-origin requests are rejected (403)"; } || { FAIL=$((FAIL+1)); echo "FAIL - Origin header not rejected"; }
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "$HTTP/json/version")" = "403" ] && { PASS=$((PASS+1)); echo "ok   - non-local Host header is rejected (403)"; } || { FAIL=$((FAIL+1)); echo "FAIL - Host header not rejected"; }
+  R=$(timeout 60 node "$HERE/cdp/raw.mjs" "$WSURL" "$FIX" 2>&1 | tail -1)
+  check "cdp: version, targets, attach" '.version=="agent-browser/0.1" and .pageTargets>=1 and .attached' "$R"
+  check "cdp: Page.navigate emits frameNavigated, lifecycle and load" '.navigateHasLoader and .loadEvent and .frameNavigated and (.lifecycle|index("load")!=null and index("DOMContentLoaded")!=null)' "$R"
+  check "cdp: Runtime.evaluate values, promises and exceptions" '.sum==3 and .title=="Login" and .promise==42 and .exception=="Error: boom"' "$R"
+  check "cdp: remote objects and callFunctionOn" '.h1Subtype=="node" and .callFunctionOn=="Sign in"' "$R"
+  check "cdp: DOM query, box model, focus + insertText, mouse click focuses" '.querySelector and .boxHasSize and .typed=="alice" and .focusedAfterClick=="u"' "$R"
+  check "cdp: screenshot and accessibility tree" '.screenshotBytes>1000 and .axNodes>2' "$R"
+  check "cdp: unsupported things fail loudly" '(.fetchEnable|test("not supported")) and (.browserContext|test("not supported")) and .unknown==-32601 and .unknownSession==-32001' "$R"
+  check "cdp: createTarget/closeTarget" '.createdListed and .closed' "$R"
+  R=$(ab cdp stop);                               check "cdp stop" '.ok and .result.running==false' "$R"
+  curl -s -m 2 "$HTTP/json/version" >/dev/null 2>&1 && { FAIL=$((FAIL+1)); echo "FAIL - endpoint still answering after stop"; } || { PASS=$((PASS+1)); echo "ok   - endpoint is closed after stop"; }
+else echo "skip - CDP tests (need Node 22+)"; fi
 
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

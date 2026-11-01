@@ -49,6 +49,8 @@ private let mcpTools: [[String: Any]] = [
     tool("browser_storage", "Export or import localStorage/sessionStorage for the current page's origin.",
          ["action": ["type": "string", "enum": ["export", "import"]], "path": ["type": "string"]], required: ["action"]),
     tool("browser_status", "Session, profile (null = temporary), tab count, watch state."),
+    tool("browser_cdp", "Start/stop/inspect a thin Chrome DevTools Protocol endpoint on 127.0.0.1 (WebKit-backed; no request interception or browser contexts). Returns the http and ws URLs for tools like Puppeteer.",
+         ["action": ["type": "string", "enum": ["start", "stop", "status"]], "port": ["type": "number", "description": "0 or omitted = pick a free port"]]),
     tool("browser_watch", "Show or hide the live watch window for the user. 'pause' hands control to the user; agent commands then wait until 'resume'.",
          ["mode": ["type": "string", "enum": ["on", "off", "pause", "resume", "status"]]], required: ["mode"]),
     tool("browser_close", "Stop the browser helper and discard its temporary profile."),
@@ -90,6 +92,10 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
         var args: [String: Any] = ["action": s("action")]
         if !s("path").isEmpty { args["path"] = s("path") }
         return ["cmd": name == "browser_cookies" ? "cookies" : "storage", "args": args]
+    case "browser_cdp":
+        var args: [String: Any] = ["action": s("action").isEmpty ? "start" : s("action")]
+        if let port = n("port") { args["port"] = port }
+        return ["cmd": "cdp", "args": args]
     case "browser_status": return ["cmd": "status", "args": [:]]
     case "browser_watch": return ["cmd": "watch", "args": ["mode": s("mode").isEmpty ? "on" : s("mode")]]
     case "browser_close": return ["cmd": "close", "args": [:]]

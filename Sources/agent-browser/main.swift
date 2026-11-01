@@ -18,6 +18,7 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   cookies export [file] | import <file> | clear
   storage export [file] | import <file>      localStorage/sessionStorage of the current origin
   status                           session, profile, tabs
+  cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
   close                            stop the helper
   mcp                              run as an MCP server on stdio (same tools, for Claude Code, Cursor, ...)
@@ -138,6 +139,9 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         needPositional(1, cmd == "cookies" ? "export [file] | import <file> | clear" : "export [file] | import <file>")
         args["action"] = positional[0]
         if positional.count > 1 { args["path"] = absolutePath(positional[1]) }
+    case "cdp":
+        args["action"] = positional.first ?? "start"
+        if let port = num("port") { args["port"] = port }
     case "watch":
         let mode = positional.first ?? "on"
         if !["on", "off", "pause", "resume", "status"].contains(mode) { fail("USAGE", "watch takes on|off|pause|resume|status") }

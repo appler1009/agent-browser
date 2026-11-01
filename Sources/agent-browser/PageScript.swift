@@ -26,16 +26,17 @@ let pageScript = #"""
       API.pending++;
       const a = arguments;
       return of.apply(this, a).then(
-        (r) => { API.pending--; if (!r.ok) post({ type: 'request-failed', url: String(r.url), status: r.status }); return r; },
+        (r) => { API.pending--; post({ type: 'cdp:net', kind: 'Fetch', url: String(r.url), method: String((a[1] && a[1].method) || (a[0] && a[0].method) || 'GET').toUpperCase(), status: r.status }); if (!r.ok) post({ type: 'request-failed', url: String(r.url), status: r.status }); return r; },
         (e) => { API.pending--; post({ type: 'request-failed', url: String((a[0] && a[0].url) || a[0]), error: String(e) }); throw e; });
     };
   }
   const xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (m, u) { this.__abUrl = u; return xo.apply(this, arguments); };
+  XMLHttpRequest.prototype.open = function (m, u) { this.__abUrl = u; this.__abMethod = m; return xo.apply(this, arguments); };
   XMLHttpRequest.prototype.send = function () {
     API.pending++;
     this.addEventListener('loadend', () => {
       API.pending--;
+      post({ type: 'cdp:net', kind: 'XHR', url: String(this.__abUrl), method: String(this.__abMethod || 'GET').toUpperCase(), status: this.status });
       if (this.status === 0 || this.status >= 400) post({ type: 'request-failed', url: String(this.__abUrl), status: this.status });
     });
     return xs.apply(this, arguments);
@@ -402,6 +403,219 @@ let pageScript = #"""
     if (text) out.text = ((document.body && document.body.innerText) || '').includes(text);
     if (urlSub) out.url = location.href.includes(urlSub);
     return out;
+  };
+
+  // ---- CDP support: remote objects, DOM node ids, input synthesis ---------
+  API.objs = new Map(); API.objSeq = 0;
+  API.nodeIds = new WeakMap(); API.nodeById = new Map(); API.nodeSeq = 0;
+  function nodeIdOf(el) {
+    let id = API.nodeIds.get(el);
+    if (!id) { id = ++API.nodeSeq; API.nodeIds.set(el, id); API.nodeById.set(id, el); }
+    return id;
+  }
+  const regObj = (v) => { const id = 'o' + (++API.objSeq); API.objs.set(id, v); return id; };
+  function remote(v, byValue) {
+    const t = typeof v;
+    if (v === undefined) return { type: 'undefined' };
+    if (v === null) return { type: 'object', subtype: 'null', value: null };
+    if (t === 'boolean' || t === 'string') return { type: t, value: v };
+    if (t === 'number') {
+      if (!Number.isFinite(v) || Object.is(v, -0)) {
+        const u = Number.isNaN(v) ? 'NaN' : Object.is(v, -0) ? '-0' : v > 0 ? 'Infinity' : '-Infinity';
+        return { type: 'number', unserializableValue: u, description: u };
+      }
+      return { type: 'number', value: v, description: String(v) };
+    }
+    if (t === 'bigint') return { type: 'bigint', unserializableValue: v + 'n', description: v + 'n' };
+    if (t === 'symbol') return { type: 'symbol', description: String(v), objectId: regObj(v) };
+    if (t === 'function') return { type: 'function', className: 'Function', description: short(Function.prototype.toString.call(v), 200), objectId: regObj(v) };
+    if (byValue) { try { return { type: 'object', value: JSON.parse(JSON.stringify(v)) }; } catch (e) { return { type: 'object', value: null }; } }
+    let sub;
+    if (Array.isArray(v)) sub = 'array'; else if (v instanceof Node) sub = 'node'; else if (v instanceof Error) sub = 'error';
+    else if (v instanceof Promise) sub = 'promise'; else if (v instanceof RegExp) sub = 'regexp'; else if (v instanceof Date) sub = 'date';
+    else if (v instanceof Map) sub = 'map'; else if (v instanceof Set) sub = 'set';
+    const cn = (v.constructor && v.constructor.name) || 'Object';
+    const o = { type: 'object', className: cn, objectId: regObj(v),
+      description: v instanceof Element ? describe(v) : Array.isArray(v) ? 'Array(' + v.length + ')' : v instanceof Error ? errDesc(v) : cn };
+    if (sub) o.subtype = sub;
+    return o;
+  }
+  // JavaScriptCore's stack has no "Name: message" header (V8's does), so build it: clients show this text.
+  function errDesc(e) { return e.name + ': ' + e.message + (e.stack ? '\n    at ' + String(e.stack).split('\n').join('\n    at ') : ''); }
+  function exc(e) {
+    const r = remote(e, false);
+    if (e instanceof Error) r.description = errDesc(e);
+    return { exceptionId: ++API.objSeq, text: 'Uncaught', lineNumber: 0, columnNumber: 0, exception: r };
+  }
+  API.cdpEvaluate = async function (expr, byValue, awaitP) {
+    try {
+      let v = (0, eval)(expr);
+      if (awaitP && v && typeof v.then === 'function') v = await v;
+      return { result: remote(v, byValue) };
+    } catch (e) { return { result: remote(e, false), exceptionDetails: exc(e) }; }
+  };
+  const argValue = (a) => a.objectId ? API.objs.get(a.objectId)
+    : a.unserializableValue !== undefined ? ({ 'NaN': NaN, 'Infinity': Infinity, '-Infinity': -Infinity, '-0': -0 })[a.unserializableValue] : a.value;
+  API.cdpCall = async function (fnSrc, thisId, args, byValue, awaitP) {
+    try {
+      const fn = (0, eval)('(' + fnSrc + ')');
+      let v = fn.apply(thisId ? API.objs.get(thisId) : undefined, (args || []).map(argValue));
+      if (awaitP && v && typeof v.then === 'function') v = await v;
+      return { result: remote(v, byValue) };
+    } catch (e) { return { result: remote(e, false), exceptionDetails: exc(e) }; }
+  };
+  API.cdpProps = function (id, own) {
+    const o = API.objs.get(id), out = [];
+    if (o === undefined || o === null) return { result: out };
+    const seen = new Set();
+    for (let p = Object(o); p && p !== Object.prototype; p = own ? null : Object.getPrototypeOf(p)) {
+      for (const k of Object.getOwnPropertyNames(p)) {
+        if (seen.has(k)) continue; seen.add(k);
+        let val; try { val = o[k]; } catch (e) { continue; }
+        out.push({ name: k, value: remote(val, false), writable: true, configurable: true, enumerable: Object.prototype.propertyIsEnumerable.call(Object(o), k), isOwn: true });
+      }
+    }
+    return { result: out };
+  };
+  API.cdpRelease = function (id) { if (id) API.objs.delete(id); else API.objs.clear(); };
+
+  function nodeFrom(p) {
+    if (p.objectId) return API.objs.get(p.objectId);
+    return API.nodeById.get(p.nodeId || p.backendNodeId);
+  }
+  function nodeDesc(n, depth) {
+    const d = { nodeId: nodeIdOf(n), backendNodeId: nodeIdOf(n), nodeType: n.nodeType, nodeName: n.nodeName,
+      localName: n.localName || '', nodeValue: n.nodeType === 3 ? n.nodeValue : '', childNodeCount: n.childNodes.length };
+    if (n.nodeType === 1) { d.attributes = []; for (const a of n.attributes) d.attributes.push(a.name, a.value); }
+    if (n.nodeType === 9) { d.documentURL = location.href; d.baseURL = document.baseURI; }
+    if (depth !== 0) d.children = Array.from(n.childNodes).filter((c) => c.nodeType === 1 || c.nodeType === 3).map((c) => nodeDesc(c, depth > 0 ? depth - 1 : depth));
+    return d;
+  }
+  const quads = (el) => Array.from(el.getClientRects()).map((r) => [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom]);
+  API.cdpDom = function (op, p) {
+    if (op === 'getDocument') return { root: nodeDesc(document, p.depth === undefined ? 1 : p.depth) };
+    const el = nodeFrom(p);
+    if (!el) return { error: 'Could not find node with given id' };
+    switch (op) {
+      case 'describeNode': return { node: nodeDesc(el, p.depth === undefined ? 0 : p.depth) };
+      case 'resolveNode': return { object: remote(el, false) };
+      case 'requestNode': return { nodeId: nodeIdOf(el) };
+      case 'querySelector': { const r = el.querySelector(p.selector); return { nodeId: r ? nodeIdOf(r) : 0 }; }
+      case 'querySelectorAll': return { nodeIds: Array.from(el.querySelectorAll(p.selector)).map(nodeIdOf) };
+      case 'getBoxModel': {
+        const r = el.getBoundingClientRect();
+        const q = [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom];
+        return { model: { content: q, padding: q, border: q, margin: q, width: Math.round(r.width), height: Math.round(r.height) } };
+      }
+      case 'getContentQuads': return { quads: quads(el) };
+      case 'scrollIntoViewIfNeeded': {
+        const r = el.getBoundingClientRect();
+        if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        return {};
+      }
+      case 'focus': el.focus(); return {};
+      case 'getOuterHTML': return { outerHTML: el.outerHTML };
+      case 'getAttributes': { const a = []; for (const x of el.attributes) a.push(x.name, x.value); return { attributes: a }; }
+    }
+    return { error: 'unsupported DOM operation ' + op };
+  };
+  API.cdpFiles = function (p, spec) {
+    const el = nodeFrom(p);
+    if (!el || el.tagName !== 'INPUT' || el.type !== 'file') return { error: 'node is not an input[type=file]' };
+    const dt = new DataTransfer();
+    for (const f of spec) {
+      const bin = atob(f.b64), u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      dt.items.add(new File([u8], f.name, { type: f.type }));
+    }
+    el.files = dt.files;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return {};
+  };
+
+  let mouseDownTarget = null;
+  API.cdpMouse = function (type, x, y, button, clickCount, dx, dy) {
+    const t = document.elementFromPoint(x, y) || document.body;
+    const btn = button === 'right' ? 2 : button === 'middle' ? 1 : 0;
+    const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y,
+      button: btn, buttons: type === 'mouseReleased' ? 0 : (1 << btn), detail: clickCount || 1 };
+    const po = Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, o);
+    if (type === 'mouseMoved') {
+      t.dispatchEvent(new PointerEvent('pointermove', po)); t.dispatchEvent(new MouseEvent('mousemove', o));
+      if (API.hover !== t) { if (API.hover) API.hover.dispatchEvent(new MouseEvent('mouseout', o)); t.dispatchEvent(new MouseEvent('mouseover', o)); API.hover = t; }
+    } else if (type === 'mousePressed') {
+      mouseDownTarget = t;
+      t.dispatchEvent(new PointerEvent('pointerdown', po)); t.dispatchEvent(new MouseEvent('mousedown', o));
+      const f = t.closest && t.closest('a[href],button,input,select,textarea,summary,[tabindex],[contenteditable=""],[contenteditable="true"]');
+      if (f && f.focus) f.focus({ preventScroll: true });
+      else if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    } else if (type === 'mouseReleased') {
+      t.dispatchEvent(new PointerEvent('pointerup', po)); t.dispatchEvent(new MouseEvent('mouseup', o));
+      const d = mouseDownTarget; mouseDownTarget = null;
+      if (d && (d === t || d.contains(t) || t.contains(d))) {
+        if (btn === 2) t.dispatchEvent(new MouseEvent('contextmenu', o));
+        else { t.dispatchEvent(new MouseEvent('click', o)); if (clickCount === 2) t.dispatchEvent(new MouseEvent('dblclick', o)); }
+      }
+    } else if (type === 'mouseWheel') {
+      t.dispatchEvent(new WheelEvent('wheel', Object.assign({ deltaX: dx || 0, deltaY: dy || 0 }, o)));
+      window.scrollBy(dx || 0, dy || 0);
+    }
+    return {};
+  };
+  function insertText(text) { try { return document.execCommand('insertText', false, text); } catch (e) { return false; } }
+  API.cdpInsert = function (text) { return { ok: insertText(text) }; };
+  function focusables() {
+    return Array.from(document.querySelectorAll('a[href],button,input,select,textarea,summary,[tabindex],[contenteditable="true"]'))
+      .filter((e) => !e.disabled && e.tabIndex >= 0 && !isHidden(e) && e.type !== 'hidden')
+      .sort((a, b) => (a.tabIndex || 1e9) - (b.tabIndex || 1e9));
+  }
+  let keyInserted = false;
+  API.cdpKey = function (type, key, code, text, modifiers, keyCode) {
+    const ae = document.activeElement;
+    const t = ae && ae !== document.documentElement ? ae : document.body;
+    const m = modifiers || 0;
+    const o = { key: key, code: code, bubbles: true, cancelable: true, composed: true, keyCode: keyCode || 0, which: keyCode || 0,
+      altKey: !!(m & 1), ctrlKey: !!(m & 2), metaKey: !!(m & 4), shiftKey: !!(m & 8) };
+    if (type === 'keyUp') { t.dispatchEvent(new KeyboardEvent('keyup', o)); return {}; }
+    if (type === 'char') { if (!keyInserted && text) insertText(text); keyInserted = false; return {}; }
+    keyInserted = false;
+    if (!t.dispatchEvent(new KeyboardEvent('keydown', o))) return {};
+    const enter = key === 'Enter' || text === '\r';
+    const tag = t.tagName;
+    if (enter) {
+      t.dispatchEvent(new KeyboardEvent('keypress', o));
+      if (tag === 'TEXTAREA' || t.isContentEditable) insertText('\n');
+      else if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') t.click();
+      else if (tag === 'INPUT' && t.form) { if (t.form.noValidate || t.form.checkValidity()) t.form.requestSubmit(); }
+    } else if (text) {
+      t.dispatchEvent(new KeyboardEvent('keypress', o));
+      insertText(text);
+      keyInserted = true;
+    } else if (key === 'Backspace') document.execCommand('delete');
+    else if (key === 'Delete') document.execCommand('forwardDelete');
+    else if (key === ' ' && (tag === 'BUTTON' || (tag === 'INPUT' && /^(checkbox|radio|button|submit)$/.test(t.type)))) t.click();
+    else if (key === 'Tab') {
+      const list = focusables();
+      if (list.length) { const i = list.indexOf(t); list[(i + (m & 8 ? -1 : 1) + list.length) % list.length].focus(); }
+    }
+    return {};
+  };
+  API.cdpMetrics = function () {
+    return { w: innerWidth, h: innerHeight, sw: document.documentElement.scrollWidth, sh: document.documentElement.scrollHeight,
+      x: scrollX, y: scrollY, dpr: devicePixelRatio, url: location.href, origin: location.origin, mime: document.contentType };
+  };
+  API.cdpAx = function () {
+    const out = [{ nodeId: '1', ignored: false, role: { type: 'role', value: 'RootWebArea' }, name: { type: 'computedString', value: document.title }, properties: [], childIds: [] }];
+    for (const el of document.querySelectorAll('*')) {
+      const role = roleOf(el);
+      if (!role || el.closest('[aria-hidden=true]') || isHidden(el)) continue;
+      const id = String(out.length + 1);
+      out.push({ nodeId: id, parentId: '1', ignored: false, role: { type: 'role', value: role },
+        name: { type: 'computedString', value: nameOf(el) }, properties: [], childIds: [], backendDOMNodeId: nodeIdOf(el) });
+      out[0].childIds.push(id);
+    }
+    return { nodes: out };
   };
 })();
 """#

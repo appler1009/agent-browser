@@ -1,0 +1,7 @@
+<!doctype html><html><head><title>Frames</title></head><body>
+<p id="state">state: ?</p><p id="frames">frames: 0</p>
+<script>
+let n = 0;
+(function f() { n++; document.getElementById('frames').textContent = 'frames: ' + n;
+  document.getElementById('state').textContent = 'state: ' + document.visibilityState; requestAnimationFrame(f); })();
+</script></body></html>
