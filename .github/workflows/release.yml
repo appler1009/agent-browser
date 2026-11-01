@@ -11,7 +11,10 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    # Tart VM runner on the maintainer's Mac mini. If it is offline, set the repository variable
+    # CI_RUNS_ON to '"macos-26"' (with the quotes) to run on a GitHub-hosted runner instead.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","tart"]') }}
+    timeout-minutes: 30
     env:
       TEAM_ID: ${{ secrets.TEAM_ID }}
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -27,7 +30,9 @@ jobs:
             exit 1
           fi
 
+      # The Tart image already has the Xcode we want; only GitHub-hosted images need selecting.
       - name: Select latest Xcode
+        if: runner.environment == 'github-hosted'
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
@@ -41,7 +46,9 @@ jobs:
           asc-key: ${{ secrets.ASC_KEY_P8 }}
 
       - name: Build, sign, test, notarize, package
-        run: Scripts/package.sh
+        run: |
+          export PATH="/opt/homebrew/bin:$PATH"  # Homebrew is not on PATH in the Tart VM shell
+          Scripts/package.sh
 
       - name: Publish GitHub release
         env:

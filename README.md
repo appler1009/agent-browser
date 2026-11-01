@@ -102,3 +102,7 @@ Set `AGENT_BROWSER_CDP_TRACE=<file>` before starting the helper to log DevTools 
 ### Release
 
 `Scripts/package.sh` builds a universal binary, signs it (Developer ID, Hardened Runtime), runs the integration tests against the signed binary, notarizes it and writes `dist/agent-browser-<version>-macos.tar.gz`. Locally it uses the Developer ID identity from your keychain (team in a git-ignored `.signing.local`); notarization needs an `AgentBrowser-Notary` keychain profile or `ASC_*` variables. Pushing a tag `vX.Y.Z` matching `VERSION` runs `.github/workflows/release.yml`, which needs the repository secrets `TEAM_ID`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PWD`, `KEYCHAIN_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`. Keep `VERSION` and `Sources/agent-browser/Version.swift` in step.
+
+## License
+
+[MIT](LICENSE)
