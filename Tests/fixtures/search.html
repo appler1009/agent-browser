@@ -1,0 +1,11 @@
+<!doctype html><html><head><title>Search</title></head><body>
+<h1>Search</h1>
+<input id="q" type="search" placeholder="Search items">
+<button id="go" onclick="run()">Search</button>
+<button id="al" onclick="alert('hello there')">Alert</button>
+<ul id="results"></ul>
+<script>
+console.error('boom on load');
+function run(){const q=document.getElementById('q').value;const r=document.getElementById('results');r.innerHTML='';
+ ['apple','apricot','banana'].filter(x=>x.startsWith(q)).forEach(x=>{const li=document.createElement('li');const a=document.createElement('a');a.href='#'+x;a.textContent='Result: '+x;li.appendChild(a);r.appendChild(li);});}
+</script></body></html>

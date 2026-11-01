@@ -1,0 +1,12 @@
+<!doctype html><html><head><title>Consent</title>
+<style>.overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10}
+.banner{position:fixed;left:20%;top:30%;width:60%;background:#fff;padding:20px;z-index:11}</style></head><body>
+<h1>Shop</h1>
+<button id="buy" onclick="document.getElementById('msg').textContent='bought'">Buy now</button>
+<button id="vanish" onclick="document.getElementById('gone').style.display='none'">Hide the other</button>
+<button id="gone">Ephemeral</button>
+<p id="msg"></p>
+<div class="overlay" id="ov"></div>
+<div class="banner" id="consent"><p>We use cookies</p>
+<button id="accept" onclick="document.getElementById('ov').remove();document.getElementById('consent').remove()">Accept cookies</button></div>
+</body></html>
