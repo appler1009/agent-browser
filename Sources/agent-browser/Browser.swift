@@ -3,6 +3,7 @@ import WebKit
 
 /// Socket file owned by this helper process; removed when it exits via `close`.
 nonisolated(unsafe) var daemonSocketPath = ""
+nonisolated(unsafe) var daemonSession = "default"
 
 struct CmdError: Error {
     var code: String
@@ -27,7 +28,8 @@ enum NavResult {
 @MainActor
 final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     let window: NSWindow
-    let webView: WKWebView
+    let webView: WatchWebView
+    private(set) var watch: WatchWindow!
 
     private var events: [[String: Any]] = []
     private var navInFlight = false
@@ -48,7 +50,7 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
         let ucc = WKUserContentController()
         config.userContentController = ucc
         let frame = NSRect(origin: .zero, size: Browser.viewport)
-        webView = WKWebView(frame: frame, configuration: config)
+        webView = WatchWebView(frame: frame, configuration: config)
         window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
         super.init()
 
@@ -57,16 +59,8 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
         webView.navigationDelegate = self
         webView.uiDelegate = self
 
-        // Windowless: a borderless, click-through, never-activated window kept off screen so
-        // layout, timers and rendering still run without any visible UI or focus change.
-        window.contentView = webView
-        window.isReleasedWhenClosed = false
-        window.ignoresMouseEvents = true
-        window.hasShadow = false
-        window.isExcludedFromWindowsMenu = true
-        window.collectionBehavior = [.stationary, .ignoresCycle, .transient]
-        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
-        window.orderBack(nil)
+        // Windowless by default; `watch on` shows the same page on screen.
+        watch = WatchWindow(window: window, webView: webView, session: daemonSession)
     }
 
     // MARK: events
@@ -218,20 +212,52 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
     }
 
     private func handle(_ req: [String: Any]) async -> [String: Any] {
-        await withLock {
-            lastActivity = Date()
-            let cmd = req["cmd"] as? String ?? ""
-            let args = req["args"] as? [String: Any] ?? [:]
-            do {
-                let result = try await run(cmd, args)
-                return ["ok": true, "result": result, "events": drainEvents()]
-            } catch let e as CmdError {
-                return ["ok": false, "error": e.dict, "events": drainEvents()]
-            } catch {
-                return ["ok": false, "error": CmdError(code: "INTERNAL", message: "\(error)", retrySafe: false).dict,
-                        "events": drainEvents()]
-            }
+        // `watch` must work while a paused command holds the lock, and must not steal its events.
+        if req["cmd"] as? String == "watch" { return await execute(req, drain: false) }
+        return await withLock { await execute(req, drain: true) }
+    }
+
+    private func execute(_ req: [String: Any], drain: Bool) async -> [String: Any] {
+        lastActivity = Date()
+        let cmd = req["cmd"] as? String ?? ""
+        let args = req["args"] as? [String: Any] ?? [:]
+        func events() -> [[String: Any]] { drain ? drainEvents() : [] }
+        // A human who paused / took over holds the page; agent commands wait.
+        if drain && watch.paused && cmd != "close" {
+            let t0 = Date()
+            log("waiting-for-human")
+            while watch.paused { try? await Task.sleep(nanoseconds: 100_000_000) }
+            log("resumed", ["waited_ms": Int(Date().timeIntervalSince(t0) * 1000)])
         }
+        let label = stepLabel(cmd, args)
+        do {
+            let result = try await run(cmd, args)
+            if drain { watch.step("\(label) → \(stepSummary(result))", ok: true) }
+            return ["ok": true, "result": result, "events": events()]
+        } catch let e as CmdError {
+            if drain { watch.step("\(label) ✗ \(e.code): \(e.message)", ok: false) }
+            return ["ok": false, "error": e.dict, "events": events()]
+        } catch {
+            if drain { watch.step("\(label) ✗ INTERNAL: \(error)", ok: false) }
+            return ["ok": false, "error": CmdError(code: "INTERNAL", message: "\(error)", retrySafe: false).dict,
+                    "events": events()]
+        }
+    }
+
+    private func stepLabel(_ cmd: String, _ args: [String: Any]) -> String {
+        var parts = [cmd]
+        for k in ["url", "ref", "mode", "selector", "gone", "text", "path"] {
+            if let v = args[k] as? String, !v.isEmpty { parts.append(v.count > 60 ? String(v.prefix(59)) + "…" : v) }
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func stepSummary(_ r: [String: Any]) -> String {
+        if let o = r["outcome"] as? String { return o }
+        if let t = r["title"] as? String, let u = r["url"] as? String { return "\(t) (\(u))" }
+        if let n = r["refs"] as? Int { return "\(n) refs" }
+        if let p = r["path"] as? String { return p }
+        return "ok"
     }
 
     private func str(_ args: [String: Any], _ key: String) throws -> String {
@@ -250,6 +276,7 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
         case "submit": return try await act("submit", ref: try str(args, "ref"), arg: "")
         case "wait": return try await wait(args)
         case "screenshot": return try await screenshot(try str(args, "path"))
+        case "watch": return try watchCommand(args)
         case "close":
             let sock = daemonSocketPath
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -281,6 +308,18 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
     }
 
     // MARK: commands
+
+    private func watchCommand(_ args: [String: Any]) throws -> [String: Any] {
+        switch args["mode"] as? String ?? "on" {
+        case "on": watch.show()
+        case "off": watch.hide()
+        case "pause": watch.setPaused(true)
+        case "resume": watch.setPaused(false)
+        case "status": break
+        default: throw CmdError(code: "USAGE", message: "watch takes on|off|pause|resume|status")
+        }
+        return ["watching": watch.visible, "paused": watch.paused]
+    }
 
     private func open(_ args: [String: Any]) async throws -> [String: Any] {
         var raw = try str(args, "url").trimmingCharacters(in: .whitespaces)
@@ -323,7 +362,8 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessa
         let beforeMut = (try await js("return window.__abApi.mut") as? NSNumber)?.intValue ?? 0
         let mark = events.count
 
-        guard var res = try await js("return window.__abApi.act(op, ref, arg)", ["op": op, "ref": ref, "arg": arg])
+        guard var res = try await js("return window.__abApi.act(op, ref, arg, watch)",
+                                  ["op": op, "ref": ref, "arg": arg, "watch": watch.visible])
             as? [String: Any]
         else { throw CmdError(code: "ACTION_FAILED", message: "no result from page", retrySafe: false) }
 

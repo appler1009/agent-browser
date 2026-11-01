@@ -13,7 +13,10 @@ let pageScript = #"""
 
   // ---- event hooks -------------------------------------------------------
   try {
-    new MutationObserver((m) => { API.mut += m.length; })
+    const isHl = (r) => API.hl && (r.target === API.hl ||
+      Array.prototype.some.call(r.addedNodes, (x) => x === API.hl) ||
+      Array.prototype.some.call(r.removedNodes, (x) => x === API.hl));
+    new MutationObserver((m) => { API.mut += m.filter((r) => !isHl(r)).length; })
       .observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   } catch (e) {}
 
@@ -286,10 +289,29 @@ let pageScript = #"""
     if (!el || !el.isConnected) return { error: err('STALE_REF', 'The element for ' + ref + ' is no longer in the document. No action was performed; run snapshot again.') };
     return { el: el };
   }
+  // Red outline drawn over the target while the watch window is open (ignored by mutation counting).
+  function highlight(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      if (!API.hl) {
+        const d = document.createElement('div');
+        d.setAttribute('data-ab-hl', '');
+        d.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;box-sizing:border-box;border:3px solid #ff3b30;border-radius:4px;box-shadow:0 0 0 2px rgba(255,255,255,.85)';
+        API.hl = d;
+      }
+      const d = API.hl;
+      d.style.left = r.left + 'px'; d.style.top = r.top + 'px';
+      d.style.width = r.width + 'px'; d.style.height = r.height + 'px';
+      document.documentElement.appendChild(d);
+      clearTimeout(API.hlT);
+      API.hlT = setTimeout(() => d.remove(), 2000);
+    } catch (e) {}
+  }
   function actionable(el) {
     if (isHidden(el)) return err('ELEMENT_HIDDEN', describe(el) + ' is not visible (display:none, visibility:hidden, opacity:0 or zero size).', { element: describe(el) });
     if (isDisabled(el)) return err('ELEMENT_DISABLED', describe(el) + ' is disabled.', { element: describe(el) });
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    if (API.watch) highlight(el);
     const h = hitTest(el);
     if (h.offscreen) return err('OFFSCREEN', describe(el) + ' could not be scrolled into the viewport.', { element: describe(el) });
     if (h.covered_by) return err('ELEMENT_COVERED', describe(el) + ' is covered by ' + h.covered_by + ' at (' + Math.round(h.x) + ',' + Math.round(h.y) + ').',
@@ -297,7 +319,8 @@ let pageScript = #"""
     return { ok: true, x: h.x, y: h.y };
   }
   const NON_TEXT = ['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color', 'hidden'];
-  API.act = function (op, ref, arg) {
+  API.act = function (op, ref, arg, watch) {
+    API.watch = !!watch;
     const r = resolve(ref);
     if (r.error) return r.error;
     const el = r.el;
@@ -335,6 +358,7 @@ let pageScript = #"""
       }
       if (op === 'submit') {
         const form = el.tagName === 'FORM' ? el : (el.form || el.closest('form'));
+        if (API.watch && form) highlight(form);
         if (!form) return err('NO_FORM', describe(el) + ' is not inside a form.', { element: describe(el) });
         if (!form.noValidate && !form.checkValidity()) {
           const bad = form.querySelector(':invalid');

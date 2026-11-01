@@ -58,6 +58,39 @@ echo "$T" | grep -q 'Result: apple' && echo "$T" | grep -q 'Result: apricot' && 
 AL=$(ref "$T" 'button "Alert"')
 R=$(ab click "$AL");                              check "dialog reported as outcome" '.ok and (.result.outcome=="dialog: alert(\"hello there\")")' "$R"
 
+# --- watch window -------------------------------------------------------
+winfo() { # on-screen window count owned by this session's helper
+  swift - "$1" <<'SW' 2>/dev/null
+import CoreGraphics
+import Foundation
+let pid = Int32(CommandLine.arguments[1])!
+let l = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? []
+print(l.filter {
+    guard ($0[kCGWindowOwnerPID as String] as? Int32) == pid, ($0[kCGWindowLayer as String] as? Int) == 0,
+          let b = $0[kCGWindowBounds as String] as? [String: Any], let x = b["X"] as? Double, let y = b["Y"] as? Double
+    else { return false }
+    return x > -5000 && y > -5000   // the windowless helper parks its window at (-30000,-30000)
+}.count)
+SW
+}
+HPID=$(pgrep -f "agent-browser --session $AGENT_BROWSER_SESSION daemon")
+R=$(ab watch status);                             check "watch off by default" '.ok and .result.watching==false' "$R"
+[ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - no on-screen window while windowless"; } || { FAIL=$((FAIL+1)); echo "FAIL - window visible while windowless"; }
+R=$(ab watch on);                                 check "watch on" '.ok and .result.watching==true' "$R"
+[ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - watch window is on screen"; } || { FAIL=$((FAIL+1)); echo "FAIL - watch window not on screen"; }
+ab open "file://$FIX/search.html" >/dev/null
+T=$(ab snapshot | jq -r .result.tree); G=$(ref "$T" 'button "Do nothing"')
+R=$(ab click "$G");                               check "highlight does not pollute outcome (no-op stays no-op)" '.ok and .result.outcome=="no-op"' "$R"
+R=$(ab watch pause);                              check "watch pause" '.ok and .result.paused==true' "$R"
+( ab click "$G" > "${TMPDIR:-/tmp}/ab-paused-$$.json" ) &
+BG=$!; sleep 1
+kill -0 $BG 2>/dev/null && { PASS=$((PASS+1)); echo "ok   - agent command waits while paused"; } || { FAIL=$((FAIL+1)); echo "FAIL - command did not wait"; }
+ab watch resume >/dev/null; wait $BG
+R=$(cat "${TMPDIR:-/tmp}/ab-paused-$$.json"); rm -f "${TMPDIR:-/tmp}/ab-paused-$$.json"
+check "command completes after resume and reports the wait" '.ok and ([.events[].type]|index("waiting-for-human")!=null)' "$R"
+ab watch off >/dev/null
+[ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - watch off hides the window again"; } || { FAIL=$((FAIL+1)); echo "FAIL - window still visible"; }
+
 # --- wait timeout, screenshot, headless ---------------------------------
 R=$(ab wait --selector "#does-not-exist" --timeout 600); check "wait timeout is an error" '.ok==false and .error.code=="TIMEOUT"' "$R"
 SHOT="${TMPDIR:-/tmp}/ab-itest-$$.png"

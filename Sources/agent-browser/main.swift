@@ -12,6 +12,7 @@ usage: agent-browser [--session NAME] <command> [args]
   submit <ref>                     ref may be the form or any control inside it
   wait [--load] [--idle] [--selector CSS] [--gone CSS] [--text T] [--url SUBSTR] [--ms N] [--timeout MS]
   screenshot [path]                default ./screenshot.png
+  watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
   close                            stop the helper
 Every command prints one JSON object: {ok, result, events, error}.
 """
@@ -30,6 +31,7 @@ func runDaemon(session: String) -> Never {
         exit(1)
     }
     daemonSocketPath = path
+    daemonSession = session
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)  // no Dock icon, never takes focus
     let browser = Browser()
@@ -131,6 +133,10 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         for k in ["selector", "gone", "text", "url"] { if let v = flags[k] { args[k] = v } }
         if let ms = num("ms") { args["ms"] = ms }
         if let t = num("timeout") { args["timeout"] = t }
+    case "watch":
+        let mode = positional.first ?? "on"
+        if !["on", "off", "pause", "resume", "status"].contains(mode) { fail("USAGE", "watch takes on|off|pause|resume|status") }
+        args["mode"] = mode
     case "screenshot":
         let p = positional.first ?? "screenshot.png"
         args["path"] = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
