@@ -21,6 +21,7 @@ ref() { # tree, regex -> first ref on a line matching regex
 VT="$(mktemp -d)"
 export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real keychain is never touched
 export AGENT_BROWSER_POLICY_FILE="$VT/policy.json"   # test policy; ~/.agent-browser/policy.json is never touched
+export AGENT_BROWSER_HOST_ID="itest-$$"   # its own host process, never the one you use
 export AGENT_BROWSER_NOTES_DIR="$VT/notes"   # test notes; ~/.agent-browser/notes is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
@@ -80,7 +81,7 @@ print(l.filter {
 }.count)
 SW
 }
-HPID=$(pgrep -f "agent-browser --session $AGENT_BROWSER_SESSION daemon")
+HPID=$(ab status | jq -r .result.pid)
 R=$(ab watch status);                             check "watch off by default" '.ok and .result.watching==false' "$R"
 [ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - no window at all while hidden"; } || { FAIL=$((FAIL+1)); echo "FAIL - window visible while windowless"; }
 R=$(ab watch on);                                 check "watch on" '.ok and .result.watching==true' "$R"
@@ -631,6 +632,12 @@ mline() { echo "$OUT" | sed -n "$1p"; }
 check "mcp browser_note_add saves a note on the open page" '(.result.isError|not) and (.result.content[0].text|test("Press Tab"))' "$(mline 2)"
 check "mcp browser_notes returns both notes" '(.result.content[0].text|test("Login form")) and (.result.content[0].text|test("Press Tab"))' "$(mline 3)"
 check "mcp browser_note_add refuses a credential" '.result.isError==true and (.result.content[0].text|test("NOTE_SENSITIVE"))' "$(mline 4)"
+ab watch on >/dev/null; nab watch on >/dev/null; sleep 1
+[ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - two shown sessions share one window (tabs)"; } || { FAIL=$((FAIL+1)); echo "FAIL - sessions did not share a window: $(winfo $HPID)"; }
+check "both sessions share one process" '(.result.pid=='"$HPID"')' "$(nab status)"
+nab watch off >/dev/null; sleep 0.5
+[ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - hiding one session keeps the other shown"; } || { FAIL=$((FAIL+1)); echo "FAIL - hiding one session changed the other: $(winfo $HPID)"; }
+ab watch off >/dev/null; sleep 0.5
 nab close >/dev/null 2>&1
 
 # --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------

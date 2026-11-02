@@ -15,6 +15,19 @@ func socketPath(session: String) -> String {
     return dir + "/\(sanitizeSession(session)).sock"
 }
 
+/// Control socket of the host process that runs the sessions. It is keyed by this binary (path and version) and
+/// `AGENT_BROWSER_HOST_ID`, so a different build or a test run never talks to another one's host.
+func hostControlPath() -> String {
+    let dir = NSHomeDirectory() + "/.agent-browser"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let raw = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    let exe = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL.path  // the same for the CLI and the host it starts
+    let key = exe + "|" + agentBrowserVersion + "|" + (ProcessInfo.processInfo.environment["AGENT_BROWSER_HOST_ID"] ?? "")
+    var h: UInt64 = 1469598103934665603  // FNV-1a
+    for b in key.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+    return dir + "/host-" + String(h, radix: 16) + ".ctl"
+}
+
 private func makeAddr(_ path: String) -> sockaddr_un {
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)

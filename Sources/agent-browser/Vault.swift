@@ -374,7 +374,7 @@ final class Redactor {
 
 private func testStoreApproval() -> (ok: Bool, why: String) {
     // Test store only: never honoured for the real keychain vault, so an agent cannot set it to skip approval.
-    switch ProcessInfo.processInfo.environment["AGENT_BROWSER_VAULT_APPROVE"] {
+    switch SessionEnv.get("AGENT_BROWSER_VAULT_APPROVE") {
     case "yes": return (true, "")
     case "no": return (false, "denied")
     default: return (false, "no approval available in the test store")

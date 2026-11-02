@@ -5,11 +5,13 @@ import UniformTypeIdentifiers
 import Vision
 import WebKit
 
-/// Socket file owned by this helper process; removed when it exits via `close`.
-nonisolated(unsafe) var daemonSocketPath = ""
-nonisolated(unsafe) var daemonSession = "default"
-/// nil = temporary (in-memory) profile; otherwise the name of a persistent profile.
-nonisolated(unsafe) var daemonProfile: String? = nil
+/// Per-request settings from the caller's environment (test overrides such as the dialog timeout or vault approval).
+/// One host process serves many sessions, so these are carried with the request instead of read from the process.
+enum SessionEnv {
+    @TaskLocal static var values: [String: String] = [:]
+    static func get(_ key: String) -> String? { values[key] ?? ProcessInfo.processInfo.environment[key] }
+    static let forwarded = ["AGENT_BROWSER_DIALOG_TIMEOUT", "AGENT_BROWSER_VAULT_APPROVE"]
+}
 
 struct CmdError: Error {
     var code: String
@@ -78,7 +80,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     init(id: String, configuration: WKWebViewConfiguration, browser: Browser) {
         self.id = id
         self.browser = browser
-        webView = WatchWebView(frame: NSRect(origin: .zero, size: Browser.viewport), configuration: configuration)
+        webView = WatchWebView(frame: NSRect(origin: .zero, size: browser.viewport), configuration: configuration)
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -291,7 +293,13 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var downloadByObject: [ObjectIdentifier: DownloadInfo] = [:]
 
     /// Page viewport in CSS pixels; changed by the `viewport` command.
-    nonisolated(unsafe) static var viewport = NSSize(width: 1280, height: 800)
+    var viewport = NSSize(width: 1280, height: 800)
+    /// Session name and persistent profile (nil = temporary, in-memory) of this browser.
+    let session: String
+    let profile: String?
+    /// Called once the session has shut down (the host closes its socket and window).
+    var onClose: (@MainActor () -> Void)?
+    private var dialogTimeoutOverride: String?
     private var userAgent: String?
     private var blockRules: [(label: String, rule: [String: Any])] = []
 
@@ -303,9 +311,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
     }
 
-    override init() {
+    init(session: String, profile: String?) {
+        self.session = session
+        self.profile = profile
         let config = WKWebViewConfiguration()
-        if let p = daemonProfile {
+        if let p = profile {
             config.websiteDataStore = WKWebsiteDataStore(forIdentifier: Browser.storeID(for: p))
         } else {
             config.websiteDataStore = .nonPersistent()  // temporary profile
@@ -314,7 +324,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let ucc = WKUserContentController()
         config.userContentController = ucc
         configuration = config
-        window = NSWindow(contentRect: NSRect(origin: .zero, size: Browser.viewport), styleMask: [.borderless],
+        window = NSWindow(contentRect: NSRect(origin: .zero, size: NSSize(width: 1280, height: 800)), styleMask: [.borderless],
                           backing: .buffered, defer: false)
         super.init()
 
@@ -323,7 +333,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         ucc.add(self, name: "ab")
 
         let first = openTab(configuration: config, attach: false)
-        watch = WatchWindow(window: window, webView: first.webView, session: daemonSession)
+        watch = WatchWindow(window: window, webView: first.webView, session: session, viewport: { [unowned self] in self.viewport })
         if cookieFile != nil { cookieRestore = Task { await restoreCookies() } }
     }
 
@@ -432,8 +442,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     // MARK: downloads
 
     /// Where downloads are saved; created only when a download actually happens.
-    private static var downloadDir: URL {
-        URL(fileURLWithPath: NSHomeDirectory() + "/.agent-browser/downloads/\(sanitizeSession(daemonSession))")
+    private var downloadDir: URL {
+        URL(fileURLWithPath: NSHomeDirectory() + "/.agent-browser/downloads/\(sanitizeSession(session))")
     }
 
     func adopt(_ download: WKDownload, from tab: Tab) {
@@ -464,7 +474,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
         var name = (suggestedFilename as NSString).lastPathComponent
         if name.isEmpty || name == "." || name == ".." { name = "download" }
-        let dir = Browser.downloadDir
+        let dir = downloadDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var dest = dir.appendingPathComponent(name)
         var n = 1
@@ -552,7 +562,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             return jsonString(["ok": false, "events": [],
                                "error": CmdError(code: "BAD_REQUEST", message: "request was not valid JSON").dict])
         }
-        return jsonString(redactor.scrub(await handle(req)) as? [String: Any] ?? [:])
+        let env = (req["env"] as? [String: String] ?? [:]).filter { SessionEnv.forwarded.contains($0.key) }
+        // Dialogs are answered from WebKit callbacks, outside the command's task, so this one is remembered per session.
+        if let t = env["AGENT_BROWSER_DIALOG_TIMEOUT"] { dialogTimeoutOverride = t }
+        let reply = await SessionEnv.$values.withValue(env) { await handle(req) }
+        return jsonString(redactor.scrub(reply) as? [String: Any] ?? [:])
     }
 
     private func handle(_ req: [String: Any]) async -> [String: Any] {
@@ -569,11 +583,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let args = req["args"] as? [String: Any] ?? [:]
         func events() -> [[String: Any]] { drain ? drainEvents() : [] }
 
-        if let want = req["profile"] as? String, want != (daemonProfile ?? "") {
-            let have = daemonProfile.map { "profile \"\($0)\"" } ?? "a temporary profile"
+        if let want = req["profile"] as? String, want != (profile ?? "") {
+            let have = profile.map { "profile \"\($0)\"" } ?? "a temporary profile"
             return ["ok": false, "events": [], "error": CmdError(
                 code: "PROFILE_MISMATCH",
-                message: "session \"\(daemonSession)\" is already running with \(have); run close first to switch to profile \"\(want)\"").dict]
+                message: "session \"\(session)\" is already running with \(have); run close first to switch to profile \"\(want)\"").dict]
         }
         // A human who paused / took over holds the page; agent commands wait.
         if drain && watch.paused && cmd != "close" {
@@ -657,7 +671,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "screenshot": return try await screenshot(try str(args, "path"))
         case "tabs": return try await tabList()
         case "tab": return try await tabCommand(args)
-        case "downloads": return ["downloads": downloads.map(\.dict), "dir": Browser.downloadDir.path]
+        case "downloads": return ["downloads": downloads.map(\.dict), "dir": downloadDir.path]
         case "cookies": return try await cookies(args)
         case "storage": return try await storage(args)
         case "status": return await status()
@@ -667,18 +681,24 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "block": return try await blockCommand(args)
         case "watch": return try watchCommand(args)
         case "close":
-            let sock = daemonSocketPath
-            // Persistent profiles need time to flush cookies/storage to disk. A round trip to the network
-            // process first makes sure it has seen every recent cookie change; the pause lets it write them.
-            if daemonProfile != nil { await flushCookies(); await persistCookies() }
-            let delay = daemonProfile == nil ? 0.1 : 2.0
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                if !sock.isEmpty { unlink(sock) }
-                exit(0)
-            }
+            await shutdown()
             return ["closed": true]
         default:
             throw CmdError(code: "USAGE", message: "unknown command \"\(cmd)\"")
+        }
+    }
+
+    /// Stops this session. Persistent profiles need time to flush cookies/storage to disk: a round trip to the
+    /// network process first makes sure it has seen every recent cookie change; the pause lets it write them.
+    func shutdown() async {
+        if profile != nil { await flushCookies(); await persistCookies() }
+        let delay = profile == nil ? 0.1 : 2.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
+            MainActor.assumeIsolated {
+                cdp?.stop()
+                watch.destroy()
+                onClose?()
+            }
         }
     }
 
@@ -696,7 +716,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var cookieSaveError: String?
     private var undecryptable = false
 
-    private var profileDir: String? { daemonProfile.map { NSHomeDirectory() + "/.agent-browser/profiles/\($0)" } }
+    private var profileDir: String? { profile.map { NSHomeDirectory() + "/.agent-browser/profiles/\($0)" } }
     private var cookieFile: String? { profileDir.map { $0 + "/cookies.enc" } }
     private var legacyCookieFile: String? { profileDir.map { $0 + "/cookies.json" } }
 
@@ -832,12 +852,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             guard (200...4000).contains(w), (200...4000).contains(h) else {
                 throw CmdError(code: "USAGE", message: "viewport width and height must be between 200 and 4000")
             }
-            Browser.viewport = NSSize(width: w.rounded(), height: h.rounded())
-            for t in tabs { t.webView.frame = NSRect(origin: .zero, size: Browser.viewport) }
+            viewport = NSSize(width: w.rounded(), height: h.rounded())
+            for t in tabs { t.webView.frame = NSRect(origin: .zero, size: viewport) }
             watch.relayout()
             try? await Task.sleep(nanoseconds: 150_000_000)  // let the page see the resize
         }
-        return ["width": Int(Browser.viewport.width), "height": Int(Browser.viewport.height)]
+        return ["width": Int(viewport.width), "height": Int(viewport.height)]
     }
 
     private func userAgentCommand(_ args: [String: Any]) async throws -> [String: Any] {
@@ -932,7 +952,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         defer { dialogFor = nil }
         let wasVisible = watch.visible
         if !wasVisible { watch.show() }
-        let seconds = Double(ProcessInfo.processInfo.environment["AGENT_BROWSER_DIALOG_TIMEOUT"] ?? "") ?? 60
+        let seconds = Double(dialogTimeoutOverride ?? SessionEnv.get("AGENT_BROWSER_DIALOG_TIMEOUT") ?? "") ?? 60
         let r = await watch.ask(kind: kind, host: host, message: message, defaultText: defaultText, timeout: seconds)
         if !wasVisible { watch.hide() }
         return (r.accepted, r.text, r.timedOut ? "timeout" : "user")
@@ -944,9 +964,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let dlg = dialogFor  // read before any await: a pending dialog blocks the page's JavaScript
         let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : dlg != nil ? "dialog" : runningLabel != nil ? "working" : "idle"
         var s: [String: Any] = [
-            "session": daemonSession, "profile": daemonProfile ?? NSNull(), "persistent": daemonProfile != nil,
+            "session": session, "profile": profile ?? NSNull(), "persistent": profile != nil,
             "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
-            "downloads_dir": Browser.downloadDir.path,
+            "downloads_dir": downloadDir.path,
             "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",
             "state": state, "needs_you": waitingForHuman || approvalFor != nil || dlg != nil || humanCheckPending,
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
@@ -960,7 +980,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
                 """)) as? String
         }
         if let f = lastFavicon { s["favicon"] = f }
-        if daemonProfile != nil {
+        if profile != nil {
             var pc: [String: Any] = ["encrypted": true]
             if let c = cookiesSaved { pc["count"] = c.count; pc["saved_at"] = Int(c.at.timeIntervalSince1970) }
             if let e = cookieSaveError { pc["error"] = e }

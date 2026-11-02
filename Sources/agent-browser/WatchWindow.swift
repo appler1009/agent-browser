@@ -28,9 +28,17 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     private static let toolbarH: CGFloat = 34
     private static let timelineH: CGFloat = 150
-    private var vp: NSSize { Browser.viewport }
+    private let viewport: () -> NSSize
+    private var vp: NSSize { viewport() }
 
-    init(window: NSWindow, webView: WatchWebView, session: String) {
+    /// Every session's window, in one process: shown windows join one tab group, and the app has a Dock entry
+    /// only while at least one is shown.
+    private static var all: [WatchWindow] = []
+    private static var shownCount = 0
+    static let tabbingID = "dev.appler.agent-browser.watch"
+
+    init(window: NSWindow, webView: WatchWebView, session: String, viewport: @escaping () -> NSSize) {
+        self.viewport = viewport
         self.window = window
         self.webView = webView
         self.title = "agent-browser — \(session)"
@@ -42,7 +50,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         window.hasShadow = true
         window.isExcludedFromWindowsMenu = false
         window.collectionBehavior = [.managed, .fullScreenPrimary]
-        window.tabbingMode = .disallowed
+        window.tabbingIdentifier = Self.tabbingID
+        window.tabbingMode = .preferred  // sessions share one window, one tab each
+        Self.all.append(self)
         window.contentView = container
 
         webHolder.addSubview(webView)
@@ -90,7 +100,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     func show() {
         if visible && window.isVisible { savedFrame = window.frame }
+        let wasShown = visible
         visible = true
+        if !wasShown { Self.shownCount += 1 }
         // The screen the pointer is on, so the window appears where the person is looking
         // (NSScreen.main can be another display for a background app).
         let mouse = NSEvent.mouseLocation
@@ -100,7 +112,7 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         let scale = min(1, (vis.width - 40) / vp.width, (vis.height - 60 - chrome) / vp.height)
         let w = (vp.width * scale).rounded(), h = (vp.height * scale).rounded()
 
-        NSApplication.shared.setActivationPolicy(.regular)  // a Dock entry while the window exists, as for any app window
+        NSApplication.shared.setActivationPolicy(.regular)  // a Dock entry while a window is shown, as for any app window
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.minSize = NSSize(width: 520, height: 420)
         window.title = title
@@ -113,7 +125,13 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         toolbar.isHidden = false
         scroll.isHidden = false
         window.setFrameTopLeftPoint(NSPoint(x: vis.maxX - w - 20, y: vis.maxY - 20))
-        if let f = savedFrame, NSScreen.screens.contains(where: { $0.visibleFrame.intersection(f).width >= 100 && $0.visibleFrame.intersection(f).height >= 60 }) {
+        let host = Self.all.first { $0 !== self && $0.visible }
+        if let host {  // join the window that is already open as another tab, at its size and place
+            if window.tabGroup == nil || window.tabGroup !== host.window.tabGroup {
+                host.window.addTabbedWindow(window, ordered: .above)
+            }
+            window.tabGroup?.selectedWindow = window
+        } else if let f = savedFrame, NSScreen.screens.contains(where: { $0.visibleFrame.intersection(f).width >= 100 && $0.visibleFrame.intersection(f).height >= 60 }) {
             window.setFrame(f, display: true)  // a display that was unplugged since falls back to the default spot above
             layoutContent()
         }
@@ -179,8 +197,11 @@ final class WatchWindow: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        let wasShown = visible
         if visible && window.isVisible { savedFrame = window.frame }
         visible = false
+        if wasShown { Self.shownCount -= 1 }
+        if let g = window.tabGroup, g.windows.count > 1 { g.removeWindow(window) }  // out of the shared window while hidden
         window.styleMask = [.borderless]
         window.ignoresMouseEvents = true
         toolbar.isHidden = true
@@ -193,7 +214,15 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         // Hidden means hidden: no window at all (nothing transparent that could swallow clicks or confuse the person).
         // WebKit then treats the page as not visible, so pageScript keeps visibilityState and requestAnimationFrame working.
         window.orderOut(nil)
-        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock entry while hidden
+        if Self.shownCount <= 0 { NSApplication.shared.setActivationPolicy(.accessory) }  // no Dock entry while nothing is shown
+    }
+
+    /// The session is over: its window goes away for good.
+    func destroy() {
+        if visible { hide() }
+        Self.all.removeAll { $0 === self }
+        window.delegate = nil
+        window.close()
     }
 
     nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {

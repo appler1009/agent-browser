@@ -32,7 +32,7 @@ $ agent-browser click @s1:e1
 {"ok":true,"result":{"outcome":"navigated: /help/example-domains","url":"https://www.iana.org/help/example-domains",…},"events":[…]}
 ```
 
-The first command starts a background helper that owns the page (`close` stops it; it also exits after 30 idle minutes). `--session NAME` (or `AGENT_BROWSER_SESSION`) runs independent browsers side by side.
+The first command starts a background helper that owns the page (`close` stops it; it also exits after 30 idle minutes). `--session NAME` (or `AGENT_BROWSER_SESSION`) runs independent browsers side by side. All sessions run inside that one helper process, and the watch windows of sessions you show open as tabs of a single window (a session's tab leaves the window when you hide it).
 
 ## Commands
 
@@ -82,7 +82,7 @@ claude mcp add agent-browser -- /path/to/agent-browser mcp
 
 ## Menu bar
 
-`agent-browser menubar` starts a small menu bar item (it detaches, so you can close the terminal; `menubar install` starts it at login, `menubar uninstall` removes that). It lists every running session with its page and state (idle, working on a command, paused, or waiting for your approval) and lets you show or hide its window, take over (pause the agent) and resume, save a screenshot to the Desktop, see the recent steps, or close the session. The icon changes when something needs you, and a notification appears when a command is waiting for you or a saved login needs approval. It never starts a browser, and the browsers keep running if it quits.
+`agent-browser menubar` starts a small menu bar item (it detaches, so you can close the terminal; `menubar install` starts it at login, `menubar uninstall` removes that). It lists every running session with its page and state (idle, working on a command, paused, or waiting for your approval) and lets you show or hide its window, take over (pause the agent) and resume, save a screenshot to the Desktop, see the recent steps, or close the session. The icon changes when something needs you, and a notification (from the app bundle; macOS asks permission the first time) appears when a command is waiting for you or a saved login needs approval; clicking it shows that session's window. It never starts a browser, and the browsers keep running if it quits.
 
 ## Vault (logins for bots)
 
@@ -150,7 +150,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 271 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 302 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

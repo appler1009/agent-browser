@@ -20,7 +20,7 @@ enum CookieVault {
     }
 
     static func key() throws -> SymmetricKey {
-        if let cached { return cached }
+        if let cached, ProcessInfo.processInfo.environment["AGENT_BROWSER_COOKIE_KEY_FILE"] == nil { return cached }  // tests swap the key file
         // Tests keep the key in a file so the real keychain is never touched.
         if let f = ProcessInfo.processInfo.environment["AGENT_BROWSER_COOKIE_KEY_FILE"], !f.isEmpty {
             if let d = FileManager.default.contents(atPath: f), d.count == 32 { cached = SymmetricKey(data: d); return cached! }

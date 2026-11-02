@@ -415,10 +415,10 @@ final class CDP {
         case "Browser.getVersion":
             return ["protocolVersion": "1.3", "product": "agent-browser/\(agentBrowserVersion)", "revision": "", "userAgent": cdpUserAgent, "jsVersion": "JavaScriptCore"]
         case "Browser.close":
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { if !daemonSocketPath.isEmpty { unlink(daemonSocketPath) }; exit(0) }
+            Task { @MainActor in await browser.shutdown() }
             return [:]
         case "Browser.getWindowForTarget":
-            return ["windowId": 1, "bounds": ["left": 0, "top": 0, "width": Int(Browser.viewport.width), "height": Int(Browser.viewport.height), "windowState": "normal"]]
+            return ["windowId": 1, "bounds": ["left": 0, "top": 0, "width": Int(browser.viewport.width), "height": Int(browser.viewport.height), "windowState": "normal"]]
         case "Browser.setDownloadBehavior", "Browser.setPermission", "Browser.grantPermissions", "Browser.resetPermissions", "Browser.setWindowBounds":
             return [:]
 

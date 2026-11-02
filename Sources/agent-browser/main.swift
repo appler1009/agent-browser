@@ -41,49 +41,88 @@ Every command prints one JSON object: {ok, result, events, error}.
 If a result has needs_human (CAPTCHA, "prove you are human"), do not try to solve it: watch on, watch pause, ask the user to complete it, then watch resume.
 """
 
-// MARK: - daemon
+// MARK: - host
+
+/// One process runs every session: one socket per session (so the CLI, the MCP server and the menu bar item talk to
+/// a session exactly as before) and one window with a tab per shown session. It exits when its last session is gone.
+@MainActor
+final class SessionHost {
+    private struct Entry { let browser: Browser; let listenFd: Int32; let path: String }
+    private var sessions: [String: Entry] = [:]
+
+    func start(session: String, profile: String?) -> Bool {
+        if sessions[session] != nil { return true }
+        let path = socketPath(session: session)
+        if let fd = connectSocket(path) { close(fd); return false }  // an older helper process still owns it
+        guard let listenFd = listenSocket(path) else { return false }
+        let browser = Browser(session: session, profile: profile)
+        sessions[session] = Entry(browser: browser, listenFd: listenFd, path: path)
+        browser.onClose = { [unowned self] in self.finish(session) }
+        Thread.detachNewThread {
+            while true {
+                let c = accept(listenFd, nil, nil)
+                if c < 0 { if errno == EINTR || errno == ECONNABORTED { continue }; return }  // closed with the session
+                DispatchQueue.global().async {
+                    guard let line = readLineFromSocket(c) else { close(c); return }
+                    Task { @MainActor in
+                        let resp = await browser.handleLine(line)
+                        writeAllToSocket(c, resp + "\n")
+                        close(c)
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func finish(_ session: String) {
+        guard let e = sessions.removeValue(forKey: session) else { return }
+        unlink(e.path)
+        close(e.listenFd)
+        if sessions.isEmpty { unlink(hostControlPath()); exit(0) }
+    }
+
+    /// Sessions idle for 30 minutes are closed, so a forgotten one does not linger.
+    func closeIdle() {
+        for (_, e) in sessions where Date().timeIntervalSince(e.browser.lastActivity) > 30 * 60 {
+            Task { @MainActor in await e.browser.shutdown() }
+        }
+    }
+}
 
 @MainActor
-func runDaemon(session: String) -> Never {
-    let path = socketPath(session: session)
-    if let fd = connectSocket(path) {  // another helper already owns this session
+func runHost(initialSession: String? = nil, profile: String? = nil) -> Never {
+    let ctl = hostControlPath()
+    if let fd = connectSocket(ctl) {  // another host of this build is already running
         close(fd)
         exit(0)
     }
-    guard let listenFd = listenSocket(path) else {
-        FileHandle.standardError.write(Data("cannot listen on \(path)\n".utf8))
+    guard let ctlFd = listenSocket(ctl) else {
+        FileHandle.standardError.write(Data("cannot listen on \(ctl)\n".utf8))
         exit(1)
     }
-    daemonSocketPath = path
-    daemonSession = session
     let app = NSApplication.shared
-    app.setActivationPolicy(.accessory)  // no Dock icon, never takes focus
-    let browser = Browser()
+    app.setActivationPolicy(.accessory)  // no Dock icon until a window is shown, never takes focus
+    let host = SessionHost()
+    if let s = initialSession { _ = host.start(session: s, profile: profile) }
 
     Thread.detachNewThread {
         while true {
-            let c = accept(listenFd, nil, nil)
+            let c = accept(ctlFd, nil, nil)
             if c < 0 { continue }
             DispatchQueue.global().async {
-                guard let line = readLineFromSocket(c) else { close(c); return }
+                guard let line = readLineFromSocket(c), let req = parseJSON(line), req["host"] as? String == "start",
+                      let name = req["session"] as? String else { close(c); return }
+                let prof = req["profile"] as? String
                 Task { @MainActor in
-                    let resp = await browser.handleLine(line)
-                    writeAllToSocket(c, resp + "\n")
+                    let ok = host.start(session: sanitizeSession(name), profile: prof)
+                    writeAllToSocket(c, jsonString(["ok": ok]) + "\n")
                     close(c)
                 }
             }
         }
     }
-
-    // Exit after 30 idle minutes so a forgotten helper does not linger.
-    Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
-        MainActor.assumeIsolated {
-            if Date().timeIntervalSince(browser.lastActivity) > 30 * 60 {
-                unlink(path)
-                Task { @MainActor in await browser.persistCookies(); exit(0) }
-            }
-        }
-    }
+    Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in MainActor.assumeIsolated { host.closeIdle() } }
     app.run()
     exit(0)
 }
@@ -242,9 +281,11 @@ guard let cmd = argv.first else {
     exit(2)
 }
 
-if cmd == "daemon" {
-    daemonProfile = profile
-    MainActor.assumeIsolated { runDaemon(session: session) }
+if cmd == "host" {
+    MainActor.assumeIsolated { runHost() }
+}
+if cmd == "daemon" {  // older spelling: a host that starts with this session
+    MainActor.assumeIsolated { runHost(initialSession: session, profile: profile) }
 }
 if cmd == "sessions" {
     let r = listSessions()
