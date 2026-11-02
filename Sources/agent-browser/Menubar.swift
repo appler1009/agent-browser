@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import Foundation
 
 // Menu bar item: shows every running session and lets the person show its window, take over, or close it.
@@ -162,7 +163,7 @@ func removeLoginItem() {
 // MARK: - app
 
 @MainActor
-final class MenubarApp: NSObject, NSMenuDelegate {
+final class MenubarApp: NSObject, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private var sessions: [[String: Any]] = []
@@ -278,19 +279,41 @@ final class MenubarApp: NSObject, NSMenuDelegate {
         for name in now.subtracting(needs) {
             let s = sessions.first { $0["session"] as? String == name }
             let what = s?["state"] as? String == "approval" ? "is waiting for you to approve a saved login" : "has a command waiting while you have control"
-            notify(title: "agent-browser", body: "Session \"\(name)\" \(what).")
+            notify(title: "agent-browser", body: "Session \"\(name)\" \(what).", session: name)
         }
         needs = now
     }
 
-    private func notify(title: String, body: String) {
-        func esc(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "display notification \"\(esc(body))\" with title \"\(esc(title))\""]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
+    /// Notifications are credited to this app (name and icon) and need the .app bundle; a bare binary shows none,
+    /// because the older osascript route was credited to Script Editor. The menu bar icon still changes when a session needs you.
+    private static var canNotify: Bool { Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil }
+    private var notificationsAsked = false
+
+    private func notify(title: String, body: String, session: String) {
+        guard Self.canNotify else { return }
+        let center = UNUserNotificationCenter.current()
+        if !notificationsAsked {
+            notificationsAsked = true
+            center.delegate = self
+            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
+        let c = UNMutableNotificationContent()
+        c.title = title; c.body = body; c.sound = .default
+        c.userInfo = ["session": session]
+        c.threadIdentifier = session
+        center.add(UNNotificationRequest(identifier: "needs-you-\(session)", content: c, trigger: nil))
+    }
+
+    // Shown even though this app is "active"; clicking one opens that session's window.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) { done([.banner, .sound]) }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler done: @escaping () -> Void) {
+        if let name = response.notification.request.content.userInfo["session"] as? String {
+            DispatchQueue.global().async { _ = sendToRunning(session: name, request: ["cmd": "watch", "args": ["mode": "on"]]) }
+        }
+        done()
     }
 
     // MARK: menu
