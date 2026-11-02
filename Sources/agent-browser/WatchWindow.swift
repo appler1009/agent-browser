@@ -159,7 +159,12 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     // MARK: timeline
 
+    /// The last steps, newest last (shown in the menu bar item).
+    private(set) var recentSteps: [String] = []
+
     func step(_ text: String, ok: Bool) {
+        recentSteps.append((ok ? "" : "✗ ") + text)
+        if recentSteps.count > 12 { recentSteps.removeFirst(recentSteps.count - 12) }
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         let line = "\(f.string(from: Date()))  \(text)\n"

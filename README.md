@@ -48,6 +48,8 @@ The first command starts a background helper that owns the page (`close` stops i
 | `watch [on\|off\|pause\|resume\|status]` | live window; `pause` hands control to you |
 | `totp enroll <entry>`, `recovery save <entry>` | capture 2FA setup secrets and recovery codes straight into the vault |
 | `vault list` / `audit` (`add`, `rm`, `export` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
+| `sessions` | every running session with its state; never starts one |
+| `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
 | `status`, `cdp`, `mcp`, `close` | |
 
 `--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Exported cookie files are written `0600`.
@@ -72,6 +74,10 @@ claude mcp add agent-browser -- /path/to/agent-browser mcp
 ```
 
 25 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
+
+## Menu bar
+
+`agent-browser menubar` starts a small menu bar item (it detaches, so you can close the terminal; `menubar install` starts it at login, `menubar uninstall` removes that). It lists every running session with its page and state (idle, working on a command, paused, or waiting for your approval) and lets you show or hide its window, take over (pause the agent) and resume, save a screenshot to the Desktop, see the recent steps, or close the session. The icon changes when something needs you, and a notification appears when a command is waiting for you or a saved login needs approval. It never starts a browser, and the browsers keep running if it quits.
 
 ## Vault (logins for bots)
 
@@ -116,7 +122,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈25 s, 184 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 196 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

@@ -470,8 +470,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     }
 
     private func handle(_ req: [String: Any]) async -> [String: Any] {
-        // `watch` must work while a paused command holds the lock, and must not steal its events.
-        if req["cmd"] as? String == "watch" { return await execute(req, drain: false) }
+        // `watch`, `status` and `close` must work while a paused or waiting command holds the lock,
+        // and must not steal its events (the menu bar item polls `status`).
+        if ["watch", "status", "close"].contains(req["cmd"] as? String ?? "") { return await execute(req, drain: false) }
         return await withLock { await execute(req, drain: true) }
     }
 
@@ -491,10 +492,14 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         if drain && watch.paused && cmd != "close" {
             let t0 = Date()
             log("waiting-for-human")
+            waitingForHuman = true
             while watch.paused { try? await Task.sleep(nanoseconds: 100_000_000) }
+            waitingForHuman = false
             log("resumed", ["waited_ms": Int(Date().timeIntervalSince(t0) * 1000)])
         }
         let label = stepLabel(cmd, args)
+        if drain { runningLabel = label }
+        defer { if drain { runningLabel = nil } }
         do {
             let result = try await run(cmd, args)
             if drain { watch.step("\(label) → \(stepSummary(result))", ok: true) }
@@ -677,10 +682,26 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return ["watching": watch.visible, "paused": watch.paused]
     }
 
+    // What the menu bar item shows. Updated by execute() and unlock().
+    private var runningLabel: String?
+    private var waitingForHuman = false
+    private var approvalFor: String?
+    private let startedAt = Date()
+
     private func status() async -> [String: Any] {
-        ["session": daemonSession, "profile": daemonProfile ?? NSNull(), "persistent": daemonProfile != nil,
-         "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
-         "downloads_dir": Browser.downloadDir.path] as [String: Any]
+        let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : runningLabel != nil ? "working" : "idle"
+        var s: [String: Any] = [
+            "session": daemonSession, "profile": daemonProfile ?? NSNull(), "persistent": daemonProfile != nil,
+            "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
+            "downloads_dir": Browser.downloadDir.path,
+            "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",
+            "state": state, "needs_you": waitingForHuman || approvalFor != nil,
+            "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
+            "recent_steps": watch.recentSteps.suffix(8).map { $0 },
+        ]
+        if let r = runningLabel { s["command"] = r }
+        if let a = approvalFor { s["approval_for"] = a }
+        return s
     }
 
     private func open(_ args: [String: Any]) async throws -> [String: Any] {
@@ -824,7 +845,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
         if entry.meta.confirm {
             watch.step("waiting for approval to use vault entry \(name)…", ok: true)
+            approvalFor = name
             let a = await requestApproval(reason: "agent-browser wants to use the saved login \"\(name)\" on \(page)", store: vaultStore)
+            approvalFor = nil
             guard a.ok else {
                 vaultAudit(vaultStore, ["entry": name, "action": action, "origin": page, "outcome": "APPROVAL_DENIED", "why": a.why])
                 throw CmdError(code: "VAULT_APPROVAL_DENIED", message: "use of vault entry \"\(name)\" was not approved (\(a.why)). Nothing was entered.")

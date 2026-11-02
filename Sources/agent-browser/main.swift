@@ -31,6 +31,8 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
   close                            stop the helper
+  sessions                         every running session with its state (never starts one)
+  menubar [start|install|uninstall]   menu bar item listing sessions: show window, take over, close; install = start at login
   mcp                              run as an MCP server on stdio (same tools, for Claude Code, Cursor, ...)
 --profile NAME keeps cookies/storage between runs (default: temporary, discarded on close).
 Every command prints one JSON object: {ok, result, events, error}.
@@ -232,6 +234,14 @@ guard let cmd = argv.first else {
 if cmd == "daemon" {
     daemonProfile = profile
     MainActor.assumeIsolated { runDaemon(session: session) }
+}
+if cmd == "sessions" {
+    let r = listSessions()
+    print(jsonString(["ok": true, "result": ["sessions": r.sessions, "stale": r.stale], "events": []]))
+    exit(0)
+}
+if cmd == "menubar" {
+    runMenubarCLI(Array(argv.dropFirst()))
 }
 if cmd == "vault" {
     runVaultCLI(Array(argv.dropFirst()))

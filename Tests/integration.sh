@@ -256,6 +256,39 @@ R=$(ab snapshot --selector '#only');              check "--selector scopes to a 
 R=$(ab snapshot --selector '#nope');              check "--selector with no match is an error" '.ok==false and .error.code=="BAD_SELECTOR"' "$R"
 
 
+# --- sessions and the menu bar item ----------------------------------------
+ab open "file://$FIX/login.html" >/dev/null
+R=$(ab sessions);                                 check "sessions lists the running helper with its state" '.ok and ([.result.sessions[]|select(.session=="'"$AGENT_BROWSER_SESSION"'")]|length==1) and (.result.sessions[]|select(.session=="'"$AGENT_BROWSER_SESSION"'")|.state=="idle" and (.url|endswith("login.html")) and .needs_you==false and .pid>0)' "$R"
+T=$(ab snapshot | jq -r .result.tree); BTN=$(ref "$T" 'button "Log in"')
+ab wait --ms 1500 --timeout 5000 >/dev/null &
+sleep 0.5
+R=$(ab sessions);                                 check "a running command shows as working (status does not wait for the lock)" '(.result.sessions[]|select(.session=="'"$AGENT_BROWSER_SESSION"'")|.state=="working" and (.command|startswith("wait")))' "$R"
+wait
+ab watch on >/dev/null; ab watch pause >/dev/null
+ab click "$BTN" >/dev/null &
+CLICKPID=$!
+sleep 0.8
+R=$(ab sessions);                                 check "paused with a waiting command -> needs_you" '(.result.sessions[]|select(.session=="'"$AGENT_BROWSER_SESSION"'")|.state=="paused" and .needs_you==true)' "$R"
+R=$(ab menubar --dump-menu);                      check "menu model: session submenu with resume, close, needs-you marker" '[.result.menu[]|select((.title|test("'"$AGENT_BROWSER_SESSION"'")) and (.title|test("needs you")))|.children[].title]|(index("Resume (give control back)")!=null and index("Close session")!=null and index("Hide window")!=null)' "$R"
+R=$(ab watch resume);                             check "resume releases the waiting command" '.ok and .result.paused==false' "$R"
+wait $CLICKPID
+ab watch off >/dev/null
+R=$(ab menubar --dump-menu);                      check "menu model: idle session offers show window and take over" '[.result.menu[]|select(.title|test("'"$AGENT_BROWSER_SESSION"'"))|.children[].title]|(index("Show window")!=null and index("Take over (pause the agent)")!=null)' "$R"
+check "menu model: static items" '[.result.menu[].title]|(index("Open downloads folder")!=null and index("Start at login")!=null and index("Quit menu bar item")!=null)' "$R"
+LA="$(mktemp -d)"
+R=$(AGENT_BROWSER_LAUNCH_AGENTS_DIR="$LA" ab menubar install);   check "menubar install writes a launch agent" '.ok' "$R"
+[ "$(plutil -extract ProgramArguments json -o - "$LA/dev.appler.agent-browser.menubar.plist" | jq -r '.[1],.[2]' | tr '\n' ' ')" = "menubar --foreground " ] && [ "$(plutil -extract RunAtLoad raw -o - "$LA/dev.appler.agent-browser.menubar.plist")" = "true" ] && { PASS=$((PASS+1)); echo "ok   - launch agent runs 'menubar --foreground' at load"; } || { FAIL=$((FAIL+1)); echo "FAIL - launch agent contents"; }
+R=$(AGENT_BROWSER_LAUNCH_AGENTS_DIR="$LA" ab menubar --dump-menu); check "menu shows 'Start at login' checked once installed" '.result.menu[]|select(.title=="Start at login")|.checked==true' "$R"
+AGENT_BROWSER_LAUNCH_AGENTS_DIR="$LA" ab menubar uninstall >/dev/null
+[ ! -e "$LA/dev.appler.agent-browser.menubar.plist" ] && { PASS=$((PASS+1)); echo "ok   - menubar uninstall removes the launch agent"; } || { FAIL=$((FAIL+1)); echo "FAIL - launch agent not removed"; }
+rm -rf "$LA"
+"$BIN" menubar --foreground </dev/null >/dev/null 2>&1 & MBPID=$!
+sleep 2
+if kill -0 $MBPID 2>/dev/null; then kill $MBPID 2>/dev/null; wait $MBPID 2>/dev/null; PASS=$((PASS+1)); echo "ok   - menu bar item starts and keeps running"
+elif pgrep -f "menubar --foreground" >/dev/null; then PASS=$((PASS+1)); echo "ok   - menu bar item already running (single instance)"
+else FAIL=$((FAIL+1)); echo "FAIL - menu bar item exited"; fi
+
+
 # --- vault: credentials for bots -----------------------------------------
 PW='Zq9-vault-pw-1'; PW2='other-pw-4567'; TSECRET='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
 R=$(ab vault selftest);                           check "vault: TOTP matches RFC 6238 vectors" '.ok and .result.selftest=="ok"' "$R"
