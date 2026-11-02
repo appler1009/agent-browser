@@ -30,6 +30,7 @@ private func stateText(_ s: [String: Any]) -> String {
     switch s["state"] as? String ?? "idle" {
     case "working": return "working: " + clip(s["command"] as? String ?? "…", 50)
     case "paused": return (s["needs_you"] as? Bool == true) ? "paused, a command is waiting for you" : "paused (you have control)"
+    case "dialog": return "a page is asking you a question (\(s["dialog_for"] as? String ?? "dialog"))"
     case "approval": return "waiting for your approval of \"\(s["approval_for"] as? String ?? "a saved login")\""
     default: return "idle"
     }

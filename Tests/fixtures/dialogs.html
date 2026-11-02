@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>Dialogs</title>
+<body><p id="r">result: none</p>
+<button onclick="document.getElementById('r').textContent = 'result: confirm=' + confirm('Delete everything?')">Confirm</button>
+<button onclick="document.getElementById('r').textContent = 'result: prompt=' + prompt('Name?', 'bob')">Prompt</button>
+<button onclick="alert('hi'); document.getElementById('r').textContent = 'result: alerted'">Alert</button>
+</body>

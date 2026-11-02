@@ -23,7 +23,7 @@ export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real key
 export AGENT_BROWSER_POLICY_FILE="$VT/policy.json"   # test policy; ~/.agent-browser/policy.json is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp -dlg; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -396,6 +396,36 @@ if command -v python3 >/dev/null; then
   R=$(ab click "$L2");                            check "link to an allowed host still works" '.ok and (.result.url|test("b.html"))' "$R"
   kill $WPID 2>/dev/null; wait $WPID 2>/dev/null
 fi
+ab policy reset >/dev/null
+
+# --- dialogs: confirm() and prompt() follow the policy; "ask" times out as Cancel ---------
+dab() { AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-dlg" AGENT_BROWSER_DIALOG_TIMEOUT=3 "$BIN" "$@"; }
+dab open "file://$FIX/dialogs.html" >/dev/null
+rf() { local t; t=$(dab snapshot | jq -r .result.tree); CF=$(ref "$t" 'button "Confirm"'); PR=$(ref "$t" 'button "Prompt"'); AL=$(ref "$t" 'button "Alert"'); }
+shown() { dab snapshot | jq -r .result.tree | grep -o 'result: [^"]*'; }
+rf
+R=$(dab click "$AL");                             check "alert is accepted without asking" '.ok and (.result.outcome|test("^dialog: alert"))' "$R"
+ab policy set --dialogs accept >/dev/null
+rf
+R=$(dab click "$CF");                             check "dialogs=accept: confirm is accepted" '.ok and ([.events[]|select(.type=="dialog")][0]|.accepted==true and .answered_by=="policy")' "$R"
+[ "$(shown)" = "result: confirm=true" ] && { PASS=$((PASS+1)); echo "ok   - the page saw confirm()==true"; } || { FAIL=$((FAIL+1)); echo "FAIL - page result: $(shown)"; }
+rf
+R=$(dab click "$PR"); [ "$(shown)" = "result: prompt=bob" ] && { PASS=$((PASS+1)); echo "ok   - prompt returns its default text when accepted"; } || { FAIL=$((FAIL+1)); echo "FAIL - prompt result: $(shown)"; }
+ab policy set --dialogs dismiss >/dev/null
+rf
+R=$(dab click "$CF");                             check "dialogs=dismiss: confirm is cancelled" '.ok and ([.events[]|select(.type=="dialog")][0]|.accepted==false and .answered_by=="policy")' "$R"
+[ "$(shown)" = "result: confirm=false" ] && { PASS=$((PASS+1)); echo "ok   - the page saw confirm()==false"; } || { FAIL=$((FAIL+1)); echo "FAIL - page result: $(shown)"; }
+rf
+R=$(dab click "$PR"); [ "$(shown)" = "result: prompt=null" ] && { PASS=$((PASS+1)); echo "ok   - prompt returns null when cancelled"; } || { FAIL=$((FAIL+1)); echo "FAIL - prompt result: $(shown)"; }
+ab policy set --dialogs ask >/dev/null
+rf
+( dab click "$CF" > "$VT/dlg-ask.json" ) & DBG=$!
+sleep 1
+R=$(dab status);                                  check "a pending question shows as state dialog and needs_you" '.result.state=="dialog" and .result.needs_you==true and (.result.dialog_for|test("confirm"))' "$R"
+wait $DBG
+check "unanswered question times out as Cancel" '.ok and ([.events[]|select(.type=="dialog")][0]|.accepted==false and .answered_by=="timeout")' "$(cat "$VT/dlg-ask.json")"
+[ "$(shown)" = "result: confirm=false" ] && { PASS=$((PASS+1)); echo "ok   - the page saw confirm()==false after the timeout"; } || { FAIL=$((FAIL+1)); echo "FAIL - page result: $(shown)"; }
+R=$(dab status);                                  check "the session is idle again and the window is hidden" '.result.state=="idle" and .result.watching==false' "$R"
 ab policy reset >/dev/null
 
 # --- vault: credentials for bots -----------------------------------------

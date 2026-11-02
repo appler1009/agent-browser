@@ -116,6 +116,7 @@ agent-browser policy check http://192.168.0.7/ --from public                    
 - **Hosts:** with an allowlist set, other hosts are refused (`open` fails with `NAVIGATION_BLOCKED`; a link or redirect is cancelled and reported as a `navigation-blocked` event). A deny entry always wins.
 - **Private addresses (default `block`):** a page on the public internet cannot send the browser to `localhost`, a private or link-local address (`10.x`, `192.168.x`, `169.254.169.254`, `*.local`), including names that resolve to one. Addresses you type with `open` may be private, and so may links from a page you are already viewing on one. `--private allow` turns this off.
 - **Downloads:** `--max-downloads N` (default 20 per session) and `--max-download-mb N` (default 200). A download announced as too big is refused, and one that does not announce its size is cut off when it reaches the cap, with no partial file kept. Saved files get the macOS quarantine flag (`quarantined` in `downloads`), so Gatekeeper checks them before they are opened.
+- **Dialogs:** `alert()` is accepted and reported. `confirm()` and `prompt()` follow `--dialogs ask|accept|dismiss`: by default (`ask`) a sheet opens on the watch window (shown for the purpose) and the session counts as needing you; with no answer in 60 s it is cancelled, so an unattended agent never hangs. `accept` / `dismiss` answer automatically. The `dialog` event says who answered (`user`, `policy` or `timeout`).
 - **Popups:** `--max-tabs N` (default 8) caps open tabs; extra popups are dropped (`popup-blocked`) and `tab new` fails with `TAB_LIMIT`.
 
 ## DevTools protocol (thin)
@@ -133,14 +134,14 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 
 - Clicks and typing are synthesized in JavaScript, so `isTrusted` is false; a few sites check it.
 - Cross-origin iframes are listed but not entered; closed shadow roots are invisible.
-- JavaScript dialogs are accepted automatically; there is no file-chooser UI (use `upload`).
+- There is no file-chooser UI (use `upload`); `alert()` is accepted automatically and `confirm()`/`prompt()` follow the [policy](#policy-limits-you-set).
 - One profile per session; CDP evaluation is blocked on pages whose CSP forbids `eval`.
 - Pointer-driven pages that need real hover or drag are only approximated.
 
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 260 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 271 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

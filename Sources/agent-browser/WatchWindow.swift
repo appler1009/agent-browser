@@ -129,6 +129,39 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         button.frame = NSRect(x: cw - 170, y: 4, width: 160, height: 26)
     }
 
+    /// Asks the person about a page's confirm() or prompt() in a sheet on the watch window (shown if hidden).
+    /// Gives up after `timeout` seconds so an unattended session never hangs; that counts as Cancel.
+    func ask(kind: String, host: String, message: String, defaultText: String?, timeout: TimeInterval)
+        async -> (accepted: Bool, text: String?, timedOut: Bool) {
+        let alert = NSAlert()
+        alert.messageText = kind == "prompt" ? "A page is asking for input" : "A page is asking you to confirm"
+        let shown = message.count > 600 ? String(message.prefix(599)) + "…" : message
+        alert.informativeText = (host.isEmpty ? "" : host + "\n\n") + shown
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        var field: NSTextField?
+        if kind == "prompt" {
+            let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+            f.stringValue = defaultText ?? ""
+            alert.accessoryView = f
+            field = f
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)  // a question for you is worth the focus
+        return await withCheckedContinuation { cont in
+            var done = false
+            var timedOut = false
+            alert.beginSheetModal(for: window) { response in
+                if done { return }
+                done = true
+                cont.resume(returning: (response == .alertFirstButtonReturn, field?.stringValue, timedOut))
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                if !done { timedOut = true; self.window.endSheet(alert.window, returnCode: .cancel) }
+            }
+        }
+    }
+
     nonisolated func windowDidResize(_ notification: Notification) {
         MainActor.assumeIsolated { if visible { layoutContent() } }
     }

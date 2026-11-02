@@ -183,7 +183,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         finishNavigation(.failed("web content process terminated"))
     }
 
-    // MARK: UI delegate (dialogs are auto-accepted and recorded)
+    // MARK: UI delegate (alert() is accepted and recorded; confirm() and prompt() follow the policy's `dialogs` setting)
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
@@ -193,14 +193,22 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        browser.log("dialog", ["kind": "confirm", "message": message, "accepted": true], tab: self)
-        completionHandler(true)
+        let host = frame.request.url?.host ?? ""
+        Task { @MainActor in
+            let r = await browser.decideDialog(kind: "confirm", message: message, defaultText: nil, host: host)
+            browser.log("dialog", ["kind": "confirm", "message": message, "accepted": r.accepted, "answered_by": r.by], tab: self)
+            completionHandler(r.accepted)
+        }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        browser.log("dialog", ["kind": "prompt", "message": prompt, "accepted": true], tab: self)
-        completionHandler(defaultText ?? "")
+        let host = frame.request.url?.host ?? ""
+        Task { @MainActor in
+            let r = await browser.decideDialog(kind: "prompt", message: prompt, defaultText: defaultText, host: host)
+            browser.log("dialog", ["kind": "prompt", "message": prompt, "accepted": r.accepted, "answered_by": r.by], tab: self)
+            completionHandler(r.accepted ? (r.text ?? defaultText ?? "") : nil)
+        }
     }
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
@@ -881,24 +889,50 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var humanCheckPending = false
     private static let humanCheckCommands: Set<String> = ["open", "snapshot", "click", "submit", "fill", "login", "wait", "tab"]
     private var approvalFor: String?
+    private var dialogFor: String?
     private let startedAt = Date()
 
+    /// What happens to a page's confirm()/prompt(): the policy says ask (the default), accept or dismiss.
+    /// "ask" shows a sheet on the watch window; one dialog at a time; no answer within 60 s counts as Cancel.
+    func decideDialog(kind: String, message: String, defaultText: String?, host: String) async -> (accepted: Bool, text: String?, by: String) {
+        switch policy.dialogs {
+        case "accept": return (true, defaultText, "policy")
+        case "dismiss": return (false, nil, "policy")
+        default: break
+        }
+        while dialogFor != nil { try? await Task.sleep(nanoseconds: 100_000_000) }
+        dialogFor = "\(kind) from \(host.isEmpty ? "a page" : host)"
+        defer { dialogFor = nil }
+        let wasVisible = watch.visible
+        if !wasVisible { watch.show() }
+        let seconds = Double(ProcessInfo.processInfo.environment["AGENT_BROWSER_DIALOG_TIMEOUT"] ?? "") ?? 60
+        let r = await watch.ask(kind: kind, host: host, message: message, defaultText: defaultText, timeout: seconds)
+        if !wasVisible { watch.hide() }
+        return (r.accepted, r.text, r.timedOut ? "timeout" : "user")
+    }
+
+    private var lastFavicon: String?
+
     private func status() async -> [String: Any] {
-        let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : runningLabel != nil ? "working" : "idle"
+        let dlg = dialogFor  // read before any await: a pending dialog blocks the page's JavaScript
+        let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : dlg != nil ? "dialog" : runningLabel != nil ? "working" : "idle"
         var s: [String: Any] = [
             "session": daemonSession, "profile": daemonProfile ?? NSNull(), "persistent": daemonProfile != nil,
             "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
             "downloads_dir": Browser.downloadDir.path,
             "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",
-            "state": state, "needs_you": waitingForHuman || approvalFor != nil || humanCheckPending,
+            "state": state, "needs_you": waitingForHuman || approvalFor != nil || dlg != nil || humanCheckPending,
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
             "recent_steps": watch.recentSteps.suffix(8).map { $0 },
         ]
-        if let f = try? await js("""
-            const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
-            const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
-            try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
-            """) as? String { s["favicon"] = f }
+        if dlg == nil {
+            lastFavicon = (try? await js("""
+                const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
+                const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
+                try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
+                """)) as? String
+        }
+        if let f = lastFavicon { s["favicon"] = f }
         if daemonProfile != nil {
             var pc: [String: Any] = ["encrypted": true]
             if let c = cookiesSaved { pc["count"] = c.count; pc["saved_at"] = Int(c.at.timeIntervalSince1970) }
@@ -907,6 +941,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
         if let r = runningLabel { s["command"] = r }
         if let a = approvalFor { s["approval_for"] = a }
+        if let d = dlg { s["dialog_for"] = d }
         return s
     }
 

@@ -14,7 +14,9 @@ never see passwords or codes and must not ask for them. Use browser_wait (select
 shows a live window the user can pause to take over. If a CAPTCHA, a \"verify you are human\" check or a device/SMS \
 confirmation appears (CAPTCHAs are flagged with needs_human in results), do not try to solve or bypass it: call browser_watch \
 with on, then pause, tell the user exactly what to do on the page and wait until they say it is done, then \
-resume and snapshot again.
+resume and snapshot again. A policy the user set can refuse a navigation (NAVIGATION_BLOCKED, or a \
+navigation-blocked event) or a download; do not try to get around it. confirm()/prompt() dialogs wait for the user \
+and are cancelled after 60 s.
 """
 
 private func tool(_ name: String, _ description: String, _ props: [String: Any] = [:], required: [String] = []) -> [String: Any] {
