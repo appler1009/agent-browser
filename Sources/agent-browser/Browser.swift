@@ -149,6 +149,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         navCount += 1
         browser.log("load", ["url": webView.url?.absoluteString ?? ""], tab: self)
+        if browser.watch.visible, browser.current === self { Task { @MainActor in await browser.refreshFavicon() } }
         finishNavigation(.finished)
     }
 
@@ -974,7 +975,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
 
     private func watchCommand(_ args: [String: Any]) throws -> [String: Any] {
         switch args["mode"] as? String ?? "on" {
-        case "on": watch.show()
+        case "on":
+            watch.show()
+            Task { @MainActor in await refreshFavicon(); await updateTabIcon() }  // the tab shows the page icon
         case "off": watch.hide()
         case "pause": watch.setPaused(true)
         case "resume": watch.setPaused(false)
@@ -1012,6 +1015,32 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         return (r.accepted, r.text, r.timedOut ? "timeout" : "user")
     }
 
+    /// The page's icon address, asked of the page only when the address changed (or the icon was missing a few seconds
+    /// ago): the menu bar item polls `status`, and running page script on every poll costs CPU in the page for nothing.
+    /// The picture is fetched for the tab in the watch window, and only while that window is shown.
+    func refreshFavicon() async {
+        let here = current.webView.url?.absoluteString ?? ""
+        guard here != faviconFor || (lastFavicon == nil && Date().timeIntervalSince(faviconAt) > 5) else { return }
+        faviconFor = here
+        faviconAt = Date()
+        lastFavicon = (try? await js("""
+            const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
+            const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
+            try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
+            """)) as? String
+        await updateTabIcon()
+    }
+
+    private var iconShownFor: String?
+    func updateTabIcon() async {
+        guard watch.visible else { return }
+        guard let f = lastFavicon, let u = URL(string: f) else { watch.setFavicon(nil); iconShownFor = nil; return }
+        if iconShownFor == f { return }
+        iconShownFor = f
+        if await navigationBlockReason(u, policy: policy, chainPrivateOK: current.chainPrivateOK, explicit: false) != nil { watch.setFavicon(nil); return }
+        watch.setFavicon(await FaviconFetcher.fetch(u))
+    }
+
     private var lastFavicon: String?
     private var faviconFor = ""
     private var faviconAt = Date.distantPast
@@ -1020,7 +1049,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let dlg = dialogFor  // read before any await: a pending dialog blocks the page's JavaScript
         let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : dlg != nil ? "dialog" : runningLabel != nil ? "working" : "idle"
         var s: [String: Any] = [
-            "session": session, "profile": profile ?? NSNull(), "persistent": profile != nil, "media_suspended": mediaSuspended,
+            "session": session, "profile": profile ?? NSNull(), "persistent": profile != nil, "media_suspended": mediaSuspended, "tab_icon": watch.hasFavicon,
             "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
             "downloads_dir": downloadDir.path,
             "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",
@@ -1028,18 +1057,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
             "recent_steps": watch.recentSteps.suffix(8).map { $0 },
         ]
-        // Asked of the page only when the address changed (or the icon was missing a few seconds ago): the menu bar
-        // item polls `status`, and running page script on every poll costs CPU in the page for nothing.
-        let here = current.webView.url?.absoluteString ?? ""
-        if dlg == nil, here != faviconFor || (lastFavicon == nil && Date().timeIntervalSince(faviconAt) > 5) {
-            faviconFor = here
-            faviconAt = Date()
-            lastFavicon = (try? await js("""
-                const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
-                const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
-                try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
-                """)) as? String
-        }
+        if dlg == nil { await refreshFavicon() }
         if let f = lastFavicon { s["favicon"] = f }
         if profile != nil {
             var pc: [String: Any] = ["encrypted": true]

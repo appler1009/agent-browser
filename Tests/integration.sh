@@ -620,6 +620,8 @@ ab note rm www.example.com 1 >/dev/null; ab note rm shop.example.com 1 >/dev/nul
 
 # the open page: notes surface in results, and --here / the MCP tools use its host
 NP=$((20000 + $$ % 20000)); mkdir -p "$VT/site"; cp "$FIX/login.html" "$VT/site/"
+python3 -c "import base64,sys; sys.stdout.buffer.write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))" > "$VT/site/icon.png"
+printf '<!doctype html><title>Icon</title><link rel="icon" href="/icon.png"><p>hi</p>' > "$VT/site/withicon.html"
 python3 -m http.server "$NP" --bind 127.0.0.1 --directory "$VT/site" >/dev/null 2>&1 & NPID=$!
 sleep 1
 nab() { AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-notes" "$BIN" "$@"; }
@@ -643,6 +645,9 @@ check "both sessions share one process" '(.result.pid=='"$HPID"')' "$(nab status
 nab watch off >/dev/null; sleep 0.5
 [ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - hiding one session keeps the other shown"; } || { FAIL=$((FAIL+1)); echo "FAIL - hiding one session changed the other: $(winfo $HPID)"; }
 ab watch off >/dev/null; sleep 0.5
+nab open "http://127.0.0.1:$NP/withicon.html" >/dev/null; nab watch on >/dev/null; sleep 3
+check "the tab of a shown session gets the page's icon" '.result.tab_icon==true' "$(nab status)"
+nab watch off >/dev/null
 nab close >/dev/null 2>&1
 
 # --- profile management ----------------------------------------------------

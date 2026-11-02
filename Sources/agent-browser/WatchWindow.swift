@@ -41,7 +41,7 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         self.viewport = viewport
         self.window = window
         self.webView = webView
-        self.title = "agent-browser — \(session)"
+        self.title = session  // the tab shows just the session name; the app name would repeat on every tab
         super.init()
 
         window.delegate = self
@@ -95,6 +95,24 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     // MARK: show / hide
 
+    /// The page's icon, shown on this session's tab (and kept for when the window is shown again).
+    private var favicon: NSImage?
+    var hasFavicon: Bool { favicon != nil }
+    func setFavicon(_ image: NSImage?) {
+        favicon = image
+        applyFavicon()
+    }
+    private func applyFavicon() {
+        guard let tab = window.tab as NSWindowTab? else { return }
+        if let image = favicon {
+            let v = NSImageView(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+            v.image = image
+            tab.accessoryView = v
+        } else {
+            tab.accessoryView = nil
+        }
+    }
+
     /// Where you left the window (position and size), so showing it again puts it back there.
     private var savedFrame: NSRect?
 
@@ -135,6 +153,7 @@ final class WatchWindow: NSObject, NSWindowDelegate {
             window.setFrame(f, display: true)  // a display that was unplugged since falls back to the default spot above
             layoutContent()
         }
+        applyFavicon()
         window.orderFrontRegardless()  // visible, but the app is not activated
         scrollTimelineToEnd()
     }
