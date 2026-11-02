@@ -1,10 +1,13 @@
 name: Release
 
-# Push a tag matching VERSION (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build a signed
-# universal binary (notarized only if the ASC_* secrets are set) and publish it as a GitHub release.
+# Push a tag matching VERSION (e.g. `git tag v0.1.1 && git push origin v0.1.1`) to build the signed, notarized
+# app (DMG) and binary and publish them as a GitHub release. Run it by hand (Actions > Release > Run workflow)
+# for a dry run: it builds, signs and notarizes the same way and attaches the files as a workflow artifact,
+# without publishing anything.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,6 +24,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check tag matches VERSION
+        if: github.ref_type == 'tag'
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
           if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
@@ -42,13 +46,28 @@ jobs:
           asc-key: ${{ secrets.ASC_KEY_P8 }}
 
       - name: Build, sign, test, notarize, package
+        env:
+          REQUIRE_DMG_STYLE: '1'   # never ship a DMG without its background
         run: Scripts/package.sh
 
+      - name: Keep the files from a dry run
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-browser-dry-run
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          retention-days: 7
+
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            "dist/AgentBrowser-${GITHUB_REF_NAME#v}.dmg" \
             "dist/agent-browser-${GITHUB_REF_NAME#v}-macos.tar.gz" dist/SHA256SUMS.txt \
             --title "agent-browser ${GITHUB_REF_NAME#v}" \
             --generate-notes

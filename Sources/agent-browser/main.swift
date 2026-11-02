@@ -231,6 +231,11 @@ if let p = profile {
     if !ok { fail("USAGE", "--profile may only contain letters, digits, - and _") }
 }
 
+// Opened from Finder (inside Agent Browser.app, no arguments, no terminal): run the menu bar item.
+if argv.allSatisfy({ $0.hasPrefix("-psn_") }), isatty(STDIN_FILENO) == 0, Bundle.main.bundleURL.pathExtension == "app" {
+    runMenubarCLI(["--foreground"])
+}
+
 guard let cmd = argv.first else {
     print(usage)
     exit(2)

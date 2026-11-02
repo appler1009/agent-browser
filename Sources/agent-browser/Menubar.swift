@@ -36,6 +36,24 @@ private func stateText(_ s: [String: Any]) -> String {
     }
 }
 
+/// When this binary lives inside an .app, the command-line tool is a link in ~/.local/bin; nil outside an app.
+func cliToolStatus() -> (installed: Bool, link: String, target: String)? {
+    guard Bundle.main.bundleURL.pathExtension == "app", let exe = Bundle.main.executablePath else { return nil }
+    let link = NSHomeDirectory() + "/.local/bin/agent-browser"
+    let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: link)
+    return (dest == exe, link, exe)
+}
+
+func installCLITool() throws {
+    guard let s = cliToolStatus() else { return }
+    let dir = (s.link as NSString).deletingLastPathComponent
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    if (try? FileManager.default.destinationOfSymbolicLink(atPath: s.link)) != nil || FileManager.default.fileExists(atPath: s.link) {
+        try FileManager.default.removeItem(atPath: s.link)
+    }
+    try FileManager.default.createSymbolicLink(atPath: s.link, withDestinationPath: s.target)
+}
+
 func menubarHeaderGlyph(_ s: [String: Any]) -> String {
     if s["needs_you"] as? Bool == true { return "▲" }
     switch s["state"] as? String ?? "idle" {
@@ -96,6 +114,8 @@ func menuModel(sessions: [[String: Any]], stale: Int, auditExists: Bool, loginIt
     m.append(MenuEntry(title: "Vault audit log…", action: auditExists ? "open audit" : nil))
     m.append(MenuEntry(title: "Open downloads folder", action: "open downloads"))
     m.append(.sep)
+    if let cli = cliToolStatus() { m.append(MenuEntry(title: cli.installed ? "Command-line tool installed (~/.local/bin)" : "Install command-line tool…",
+                                                       action: cli.installed ? nil : "cli install", checked: cli.installed)) }
     m.append(MenuEntry(title: "Start at login", action: "login-item toggle", checked: loginItem))
     m.append(MenuEntry(title: "Quit menu bar item", action: "quit"))
     return m
@@ -318,6 +338,10 @@ final class MenubarApp: NSObject, NSMenuDelegate {
             else {
                 let root = NSHomeDirectory() + "/.agent-browser/downloads"
                 NSWorkspace.shared.open(URL(fileURLWithPath: FileManager.default.fileExists(atPath: root) ? root : NSHomeDirectory() + "/.agent-browser"))
+            }
+        case "cli":
+            do { try installCLITool() } catch {
+                let a = NSAlert(); a.messageText = "Could not install the command-line tool"; a.informativeText = "\(error.localizedDescription)"; a.runModal()
             }
         case "login-item":
             if loginItemInstalled() { removeLoginItem() } else { _ = try? installLoginItem() }
