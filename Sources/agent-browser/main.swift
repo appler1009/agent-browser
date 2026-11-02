@@ -91,6 +91,11 @@ final class SessionHost {
     }
 
     /// Sessions idle for 30 minutes are closed, so a forgotten one does not linger.
+    func suspendIdleMedia() {
+        let s = Double(ProcessInfo.processInfo.environment["AGENT_BROWSER_IDLE_SUSPEND_SECS"] ?? "") ?? 60
+        for (_, e) in sessions { e.browser.suspendMediaIfIdle(after: s) }
+    }
+
     func closeIdle() {
         for (_, e) in sessions where Date().timeIntervalSince(e.browser.lastActivity) > 30 * 60 {
             Task { @MainActor in await e.browser.shutdown() }
@@ -130,6 +135,7 @@ func runHost(initialSession: String? = nil, profile: String? = nil) -> Never {
             }
         }
     }
+    Timer.scheduledTimer(withTimeInterval: max(1, min(15, (Double(ProcessInfo.processInfo.environment["AGENT_BROWSER_IDLE_SUSPEND_SECS"] ?? "") ?? 60) / 2)), repeats: true) { _ in MainActor.assumeIsolated { host.suspendIdleMedia() } }
     Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in MainActor.assumeIsolated { host.closeIdle() } }
     app.run()
     exit(0)

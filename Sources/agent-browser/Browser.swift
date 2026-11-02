@@ -282,7 +282,21 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var busy = false
     private var lockWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var lastActivity = Date()
-    func touch() { lastActivity = Date() }
+    func touch() { lastActivity = Date(); resumeMedia() }
+
+    /// Idle sessions stop playing media (autoplaying video and audio keep the page, GPU and decoder busy for nothing).
+    /// The next command resumes it. Pages keep their other state.
+    private(set) var mediaSuspended = false
+    func suspendMediaIfIdle(after seconds: Double) {
+        guard !mediaSuspended, !watch.visible, Date().timeIntervalSince(lastActivity) > seconds else { return }
+        mediaSuspended = true
+        for t in tabs { t.webView.pauseAllMediaPlayback { }; t.webView.setAllMediaPlaybackSuspended(true) { } }
+    }
+    func resumeMedia() {
+        guard mediaSuspended else { return }
+        mediaSuspended = false
+        for t in tabs { t.webView.setAllMediaPlaybackSuspended(false) { } }
+    }
 
     /// DevTools shim hook: sees every logged event plus CDP-only notifications (commit, cdp:net, target-*).
     var cdpObserver: ((String, [String: Any], Tab?) -> Void)?
@@ -578,7 +592,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     }
 
     private func execute(_ req: [String: Any], drain: Bool) async -> [String: Any] {
-        lastActivity = Date()
+        // The menu bar item polls `status` every few seconds; that must not keep a forgotten session alive.
+        if req["cmd"] as? String != "status" { lastActivity = Date(); resumeMedia() }
         await cookieRestore?.value
         let cmd = req["cmd"] as? String ?? ""
         let args = req["args"] as? [String: Any] ?? [:]
@@ -991,7 +1006,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         let dlg = dialogFor  // read before any await: a pending dialog blocks the page's JavaScript
         let state = watch.paused ? "paused" : approvalFor != nil ? "approval" : dlg != nil ? "dialog" : runningLabel != nil ? "working" : "idle"
         var s: [String: Any] = [
-            "session": session, "profile": profile ?? NSNull(), "persistent": profile != nil,
+            "session": session, "profile": profile ?? NSNull(), "persistent": profile != nil, "media_suspended": mediaSuspended,
             "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
             "downloads_dir": downloadDir.path,
             "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",

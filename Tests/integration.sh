@@ -22,10 +22,11 @@ VT="$(mktemp -d)"
 export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real keychain is never touched
 export AGENT_BROWSER_POLICY_FILE="$VT/policy.json"   # test policy; ~/.agent-browser/policy.json is never touched
 export AGENT_BROWSER_HOST_ID="itest-$$"   # its own host process, never the one you use
+export AGENT_BROWSER_IDLE_SUSPEND_SECS=3   # idle sessions stop media after 3 s here (60 s normally)
 export AGENT_BROWSER_NOTES_DIR="$VT/notes"   # test notes; ~/.agent-browser/notes is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes -idle -leak; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -640,6 +641,17 @@ nab watch off >/dev/null; sleep 0.5
 [ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - hiding one session keeps the other shown"; } || { FAIL=$((FAIL+1)); echo "FAIL - hiding one session changed the other: $(winfo $HPID)"; }
 ab watch off >/dev/null; sleep 0.5
 nab close >/dev/null 2>&1
+
+# --- idle sessions suspend media; status polling is not activity ---------
+IS="$AGENT_BROWSER_SESSION-idle"
+iab() { AGENT_BROWSER_SESSION="$IS" "$BIN" "$@"; }
+iab open "file://$FIX/login.html" >/dev/null
+check "a session that just ran a command has media running" '.result.media_suspended==false' "$(iab status)"
+for i in 1 2 3 4 5 6 7 8; do sleep 1; iab status >/dev/null; done   # polled like the menu bar item does
+check "an idle session that is only polled suspends media" '.result.media_suspended==true' "$(iab status)"
+iab snapshot >/dev/null
+check "the next command resumes media" '.result.media_suspended==false' "$(iab status)"
+iab close >/dev/null
 
 # --- closing a session frees it; close-then-open right away works ---------
 LK="$AGENT_BROWSER_SESSION-leak"
