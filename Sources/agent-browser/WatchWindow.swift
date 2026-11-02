@@ -38,11 +38,11 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
         window.delegate = self
         window.isReleasedWhenClosed = false
-        window.hasShadow = false
-        window.isExcludedFromWindowsMenu = true
-        // Present on every Space so WebKit never considers the page hidden (that would suspend
-        // requestAnimationFrame, visibility-driven code and IntersectionObserver).
-        window.collectionBehavior = [.stationary, .ignoresCycle, .transient, .canJoinAllSpaces, .fullScreenAuxiliary]
+        // A regular, resizable, titled window (not a panel or utility window), so a window manager can tile and move it.
+        window.hasShadow = true
+        window.isExcludedFromWindowsMenu = false
+        window.collectionBehavior = [.managed, .fullScreenPrimary]
+        window.tabbingMode = .disallowed
         window.contentView = container
 
         webHolder.addSubview(webView)
@@ -96,26 +96,41 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         let scale = min(1, (vis.width - 40) / vp.width, (vis.height - 60 - chrome) / vp.height)
         let w = (vp.width * scale).rounded(), h = (vp.height * scale).rounded()
 
-        window.styleMask = [.titled, .closable, .miniaturizable]
+        NSApplication.shared.setActivationPolicy(.regular)  // a Dock entry while the window exists, as for any app window
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.minSize = NSSize(width: 520, height: 420)
         window.title = title
         window.alphaValue = 1
         window.level = .normal
         window.ignoresMouseEvents = false
         window.setContentSize(NSSize(width: w, height: h + chrome))
         container.frame = NSRect(x: 0, y: 0, width: w, height: h + chrome)
-        timeline.frame.size.width = w
-        scroll.frame = NSRect(x: 0, y: 0, width: w, height: Self.timelineH)
-        webHolder.frame = NSRect(x: 0, y: Self.timelineH, width: w, height: h)
-        webHolder.bounds = NSRect(origin: .zero, size: vp)  // scales the page down on small screens
-        webView.frame = NSRect(origin: .zero, size: vp)
-        toolbar.frame = NSRect(x: 0, y: Self.timelineH + h, width: w, height: Self.toolbarH)
-        status.frame = NSRect(x: 10, y: 8, width: w - 190, height: 18)
-        button.frame = NSRect(x: w - 170, y: 4, width: 160, height: 26)
+        layoutContent()
         toolbar.isHidden = false
         scroll.isHidden = false
         window.setFrameTopLeftPoint(NSPoint(x: vis.maxX - w - 20, y: vis.maxY - 20))
         window.orderFrontRegardless()  // visible, but the app is not activated
         scrollTimelineToEnd()
+    }
+
+    /// Fits the page (scaled to keep its proportions), the toolbar and the timeline into the current window size.
+    private func layoutContent() {
+        let cw = container.bounds.width, ch = container.bounds.height
+        let availH = max(1, ch - Self.toolbarH - Self.timelineH)
+        let scale = max(0.05, min(cw / vp.width, availH / vp.height))
+        let w = (vp.width * scale).rounded(), h = (vp.height * scale).rounded()
+        timeline.frame.size.width = cw
+        scroll.frame = NSRect(x: 0, y: 0, width: cw, height: Self.timelineH)
+        webHolder.frame = NSRect(x: ((cw - w) / 2).rounded(), y: Self.timelineH + ((availH - h) / 2).rounded(), width: w, height: h)
+        webHolder.bounds = NSRect(origin: .zero, size: vp)  // scales the page to the window
+        webView.frame = NSRect(origin: .zero, size: vp)
+        toolbar.frame = NSRect(x: 0, y: ch - Self.toolbarH, width: cw, height: Self.toolbarH)
+        status.frame = NSRect(x: 10, y: 8, width: max(40, cw - 190), height: 18)
+        button.frame = NSRect(x: cw - 170, y: 4, width: 160, height: 26)
+    }
+
+    nonisolated func windowDidResize(_ notification: Notification) {
+        MainActor.assumeIsolated { if visible { layoutContent() } }
     }
 
     func hide() {
@@ -129,13 +144,10 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         webHolder.frame = NSRect(origin: .zero, size: vp)
         webHolder.bounds = NSRect(origin: .zero, size: vp)
         webView.frame = NSRect(origin: .zero, size: vp)
-        // Windowless: on a screen (so the page counts as visible and keeps rendering) but fully
-        // transparent, click-through and below normal windows. Nothing appears, nothing takes focus.
-        let origin = (NSScreen.main ?? NSScreen.screens.first)?.frame.origin ?? .zero
-        window.alphaValue = 0
-        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
-        window.setFrameOrigin(origin)
-        window.orderBack(nil)
+        // Hidden means hidden: no window at all (nothing transparent that could swallow clicks or confuse the person).
+        // WebKit then treats the page as not visible, so pageScript keeps visibilityState and requestAnimationFrame working.
+        window.orderOut(nil)
+        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock entry while hidden
     }
 
     nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {

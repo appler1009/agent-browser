@@ -4,7 +4,7 @@ A lightweight local browser for AI agents on macOS, built on the system WebKit (
 
 - **Agent-native loop:** `snapshot` → act on a `ref` → `snapshot` again. Every command prints one JSON object.
 - **Fails loudly:** acting on a hidden, disabled or covered element is an error that names the cause. A stale ref returns `STALE_REF`. Nothing reports success that didn't happen.
-- **Windowless by default**, with an optional watch window that highlights the target and lets you pause and take over.
+- **No window by default** (nothing on screen, not even a transparent one), with an optional watch window that highlights the target and lets you pause and take over. The watch window is an ordinary titled, resizable window, so a window manager can tile and move it; it has a Dock entry only while it is shown.
 - **CLI, MCP server and a thin CDP endpoint** over the same engine.
 
 Requires macOS 14+. Not a Chrome replacement: WebKit quirks apply, and there is no request interception.

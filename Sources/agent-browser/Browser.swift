@@ -281,6 +281,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
                           backing: .buffered, defer: false)
         super.init()
 
+        ucc.addUserScript(WKUserScript(source: visibilityShim, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         ucc.addUserScript(WKUserScript(source: pageScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         ucc.add(self, name: "ab")
 

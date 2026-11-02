@@ -829,3 +829,44 @@ let pageScript = #"""
   };
 })();
 """#
+
+/// Injected into every frame. The browser has no window while hidden, so WebKit reports pages as not visible and stops
+/// requestAnimationFrame. This keeps pages behaving as if they were in a visible tab: visibilityState stays "visible",
+/// visibilitychange is not delivered, and requestAnimationFrame falls back to a timer when the native one is paused.
+let visibilityShim = #"""
+(function () {
+  if (window.__abVis) return;
+  try {
+    Object.defineProperty(window, '__abVis', { value: true, enumerable: false });
+    const def = (k, v) => { try { Object.defineProperty(document, k, { configurable: true, get: () => v }); } catch (e) {} };
+    def('visibilityState', 'visible'); def('hidden', false);
+    def('webkitVisibilityState', 'visible'); def('webkitHidden', false);
+    const stop = (e) => e.stopImmediatePropagation();
+    document.addEventListener('visibilitychange', stop, true);
+    document.addEventListener('webkitvisibilitychange', stop, true);
+    const nativeRaf = window.requestAnimationFrame.bind(window), nativeCaf = window.cancelAnimationFrame.bind(window);
+    let next = 1;
+    const live = new Map();
+    window.requestAnimationFrame = function (cb) {
+      const id = next++;
+      let done = false;
+      const run = (t) => {
+        if (done) return;
+        done = true; live.delete(id);
+        try { clearTimeout(rec.timer); nativeCaf(rec.native); } catch (e) {}
+        cb(t === undefined ? performance.now() : t);
+      };
+      const rec = { native: nativeRaf(run), timer: setTimeout(() => run(), 34) };
+      live.set(id, rec);
+      return id;
+    };
+    window.cancelAnimationFrame = function (id) {
+      const r = live.get(id);
+      if (!r) return;
+      live.delete(id);
+      try { clearTimeout(r.timer); nativeCaf(r.native); } catch (e) {}
+      r.cancelled = true;
+    };
+  } catch (e) {}
+})();
+"""#

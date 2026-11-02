@@ -74,13 +74,13 @@ let l = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? 
 print(l.filter {
     guard ($0[kCGWindowOwnerPID as String] as? Int32) == pid, ($0[kCGWindowLayer as String] as? Int) == 0,
           let a = $0[kCGWindowAlpha as String] as? Double else { return false }
-    return a > 0   // the windowless helper keeps a fully transparent window so pages count as visible
+    return a > 0   // a hidden helper has no window on screen
 }.count)
 SW
 }
 HPID=$(pgrep -f "agent-browser --session $AGENT_BROWSER_SESSION daemon")
 R=$(ab watch status);                             check "watch off by default" '.ok and .result.watching==false' "$R"
-[ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - no on-screen window while windowless"; } || { FAIL=$((FAIL+1)); echo "FAIL - window visible while windowless"; }
+[ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - no window at all while hidden"; } || { FAIL=$((FAIL+1)); echo "FAIL - window visible while windowless"; }
 R=$(ab watch on);                                 check "watch on" '.ok and .result.watching==true' "$R"
 [ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - watch window is on screen"; } || { FAIL=$((FAIL+1)); echo "FAIL - watch window not on screen"; }
 ab open "file://$FIX/search.html" >/dev/null
@@ -93,7 +93,7 @@ kill -0 $BG 2>/dev/null && { PASS=$((PASS+1)); echo "ok   - agent command waits 
 ab watch resume >/dev/null; wait $BG
 R=$(cat "${TMPDIR:-/tmp}/ab-paused-$$.json"); rm -f "${TMPDIR:-/tmp}/ab-paused-$$.json"
 check "command completes after resume and reports the wait" '.ok and ([.events[].type]|index("waiting-for-human")!=null)' "$R"
-ab watch off >/dev/null
+ab watch off >/dev/null; sleep 0.7
 [ "$(winfo $HPID)" = "0" ] && { PASS=$((PASS+1)); echo "ok   - watch off hides the window again"; } || { FAIL=$((FAIL+1)); echo "FAIL - window still visible"; }
 
 # --- wait timeout, screenshot, headless ---------------------------------
@@ -103,13 +103,13 @@ R=$(ab screenshot "$SHOT");                       check "screenshot written" '.o
 [ -s "$SHOT" ] && { PASS=$((PASS+1)); echo "ok   - png file exists"; } || { FAIL=$((FAIL+1)); echo "FAIL - png missing"; }
 rm -f "$SHOT"
 
-# --- rendering keeps running while windowless --------------------------
+# --- rendering keeps running while hidden (no window; pageScript keeps pages live) --------------------------
 ab watch off >/dev/null
 ab open "file://$FIX/raf.html" >/dev/null; sleep 1
 T=$(ab snapshot | jq -r .result.tree)
-echo "$T" | grep -q 'state: visible' && { PASS=$((PASS+1)); echo "ok   - windowless page is visibilityState=visible"; } || { FAIL=$((FAIL+1)); echo "FAIL - page considered hidden"; echo "$T"; }
+echo "$T" | grep -q 'state: visible' && { PASS=$((PASS+1)); echo "ok   - hidden page still reports visibilityState=visible"; } || { FAIL=$((FAIL+1)); echo "FAIL - page considered hidden"; echo "$T"; }
 FR=$(echo "$T" | grep -oE 'frames: [0-9]+' | grep -oE '[0-9]+')
-[ "${FR:-0}" -gt 10 ] && { PASS=$((PASS+1)); echo "ok   - requestAnimationFrame keeps firing windowless ($FR frames)"; } || { FAIL=$((FAIL+1)); echo "FAIL - rAF stalled (frames=$FR)"; }
+[ "${FR:-0}" -gt 10 ] && { PASS=$((PASS+1)); echo "ok   - requestAnimationFrame keeps firing while hidden ($FR frames)"; } || { FAIL=$((FAIL+1)); echo "FAIL - rAF stalled (frames=$FR)"; }
 
 # --- tabs ----------------------------------------------------------------
 ab open "file://$FIX/tabs.html" >/dev/null
