@@ -92,6 +92,7 @@ agent-browser fill @s1:e4 --secret github --field password
 - **Agents see names, not values.** The helper types the value; results, events, snapshots and errors never contain it, and anything a page echoes back (a password in a GET url) is redacted. No command reads a value out.
 - **Locked to the site.** An entry only works on its own origin (https, or http on localhost); elsewhere you get `ORIGIN_MISMATCH` and nothing is typed. The check also runs inside the page at fill time.
 - **`vault add` and `rm` need an interactive terminal**, so a program cannot create, replace or delete entries. Replacing an entry means typing the password again.
+- **More than one host:** repeat `--origin` on `vault add`, or change an existing entry's sites without touching its password with `vault origin NAME --add https://nid.example.com --remove https://old.example.com` (terminal only; entries with `--confirm` ask for approval).
 - **`--totp`** stores a base32 secret or `otpauth://` URI; `login` fills the current code. **`--confirm`** asks for Touch ID or your password on every use.
 - **Signing up with 2FA:** on the setup page, `totp enroll github` reads the QR code (decoded with Vision), the `otpauth://` link or the setup key and saves it into the entry; the agent never receives it, and snapshots hide setup keys and links. It refuses to guess if the page shows different secrets. Then `fill REF --secret github --field totp` types the first code. `recovery save github` stores the recovery codes the same way (`--selector CSS` if they aren't found automatically). You can also enter them yourself with `vault recovery github`.
 - **Your own backup:** `agent-browser vault export github [--qr]` (terminal only, asks for Touch ID or your password) prints the TOTP secret, the `otpauth://` link, the current code and the recovery codes, and can draw a QR code to scan into your own authenticator. Store that in your password manager or print it; the vault lives only in this Mac's login keychain and does not sync.
@@ -122,7 +123,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 198 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 210 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

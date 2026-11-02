@@ -310,6 +310,15 @@ R=$(ab vault list);                               check "vault list shows names,
 echo "$R" | grep -q -e "$PW" -e alice && { FAIL=$((FAIL+1)); echo "FAIL - vault list leaked a credential"; } || { PASS=$((PASS+1)); echo "ok   - vault list output holds no credentials"; }
 R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault add nope --origin https://example.com --username u </dev/null);  check "vault add needs a terminal (an agent cannot create entries)" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
 R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault rm site </dev/null);  check "vault rm needs a terminal" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
+R=$(ab vault origin other --add https://login.example.com);  check "vault origin --add keeps the old site and adds the new one" '.ok and .result.changed and (.result.origins==["https://example.com","https://login.example.com"])' "$R"
+R=$(ab vault origin other --add https://login.example.com);  check "vault origin --add of a known site changes nothing" '.ok and (.result.changed==false)' "$R"
+R=$(ab vault origin other --add http://evil.example.com);    check "vault origin rejects plain http to a remote host" '.ok==false and (.error.message|test("https"))' "$R"
+R=$(ab vault origin other --remove https://nowhere.example.com);  check "vault origin --remove of an unknown site fails" '.ok==false and .error.code=="VAULT_NO_ORIGIN"' "$R"
+R=$(ab vault origin other --remove https://example.com);     check "vault origin --remove drops one site" '.ok and (.result.origins==["https://login.example.com"])' "$R"
+R=$(ab vault origin other --remove https://login.example.com);  check "vault origin refuses to remove the last site" '.ok==false' "$R"
+R=$(ab vault origin nope --add https://example.com);         check "vault origin on a missing entry" '.ok==false and .error.code=="VAULT_NO_ENTRY"' "$R"
+R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault origin other --add https://x.example.com </dev/null);  check "vault origin needs a terminal (an agent cannot widen a login)" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
+R=$(ab vault list);  check "vault origin left the other entry untouched" '(.result.entries[]|select(.name=="other")|.origins)==["https://login.example.com"]' "$R"
 
 vab open "file://$FIX/login.html" >/dev/null
 T=$(vab snapshot | jq -r .result.tree); U=$(ref "$T" 'Username'); P=$(ref "$T" 'Password'); B=$(ref "$T" 'button "Log in"')
@@ -448,6 +457,9 @@ check "mcp browser_vault_list returns names without values" '.result.isError==fa
 if grep -q -e "$PW" -e "$PW2" -e "$TSECRET" -e "$CODE" -e "$KEY" -e 'Y3DP' -e 'a1b2-c3d4' "$VT/all-output.log" "$VT/vault.json.audit"; then
   FAIL=$((FAIL+1)); echo "FAIL - a stored secret appeared in command output or the audit log"; grep -n -e "$PW" -e "$PW2" -e "$CODE" "$VT/all-output.log" | cut -c1-200 | head -3
 else PASS=$((PASS+1)); echo "ok   - no stored secret appears in any command output or the audit log"; fi
+R=$(ab vault origin guarded --add https://more.example.com);  check "vault origin on a --confirm entry is denied without approval" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"
+R=$(AGENT_BROWSER_VAULT_APPROVE=yes ab vault origin guarded --add https://more.example.com);  check "vault origin on a --confirm entry works when approved" '.ok and .result.changed' "$R"
+R=$(ab vault audit --limit 100);  check "audit records origin changes with old and new sites" '[.result.entries[]|select(.action=="origin")]|length>=3' "$R"
 R=$(ab vault rm guarded);                         check "vault rm" '.ok and .result.removed=="guarded"' "$R"
 R=$(ab vault list);                               check "vault list after rm" '(.result.entries|map(.name)|index("guarded"))==null' "$R"
 

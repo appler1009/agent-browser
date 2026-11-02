@@ -28,7 +28,7 @@ private func prompt(_ text: String, secret: Bool) -> String? {
 
 func runVaultCLI(_ args: [String]) -> Never {
     let store = makeVaultStore()
-    guard let sub = args.first else { fail("USAGE", "vault takes add <name> --origin URL [--username U] [--totp] [--confirm] [--replace] | list | rm <name> | audit [--limit N] | selftest") }
+    guard let sub = args.first else { fail("USAGE", "vault takes add <name> --origin URL [--username U] [--totp] [--confirm] [--replace] | origin <name> [--add URL] [--remove URL] | list | rm <name> | audit [--limit N] | selftest") }
     var rest = Array(args.dropFirst())
 
     func takeFlag(_ name: String) -> Bool {
@@ -117,6 +117,37 @@ func runVaultCLI(_ args: [String]) -> Never {
             try store.put(entry, replace: true)
             vaultAudit(store, ["entry": name, "action": "recovery", "count": codes.count, "outcome": "ok"])
             vaultOut(["entry": name, "saved": codes.count])
+
+        case "origin":
+            needInteractive("vault origin")
+            let adds = takeValues("add"), removes = takeValues("remove")
+            guard let name = rest.first, validVaultName(name), rest.count == 1, !(adds.isEmpty && removes.isEmpty) else {
+                fail("USAGE", "vault origin <name> [--add https://site]... [--remove https://site]...")
+            }
+            guard var entry = try store.get(name) else { fail("VAULT_NO_ENTRY", "no vault entry \"\(name)\"") }
+            let addN = try adds.map { try normalizeVaultOrigin($0, allowFile: store.isTestStore) }
+            let remN = try removes.map { try normalizeVaultOrigin($0, allowFile: store.isTestStore) }
+            let before = entry.meta.origins
+            var now = Set(before)
+            for r in remN {
+                guard now.contains(r) else { fail("VAULT_NO_ORIGIN", "entry \"\(name)\" is not set for \(r)") }
+                now.remove(r)
+            }
+            now.formUnion(addN)
+            guard !now.isEmpty else { fail("USAGE", "an entry needs at least one site; use vault rm to delete it") }
+            let after = now.sorted()
+            if after == before.sorted() { vaultOut(["entry": name, "origins": after, "changed": false]) }
+            if entry.meta.confirm {
+                let a = requestApprovalSync(reason: "agent-browser wants to change the sites allowed for \"\(name)\"", store: store)
+                guard a.ok else {
+                    vaultAudit(store, ["entry": name, "action": "origin", "outcome": "APPROVAL_DENIED", "why": a.why])
+                    fail("VAULT_APPROVAL_DENIED", "the change was not approved (\(a.why)).")
+                }
+            }
+            entry.meta.origins = after
+            try store.put(entry, replace: true)
+            vaultAudit(store, ["entry": name, "action": "origin", "from": before, "origins": after, "outcome": "ok"])
+            vaultOut(["entry": name, "origins": after, "changed": true])
 
         case "rm":
             needInteractive("vault rm")
