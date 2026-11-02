@@ -252,9 +252,10 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         nextWaiterId += 1
         return await withCheckedContinuation { cont in
             navWaiters.append((id, cont))
-            Task { @MainActor in
+            // Weak: a sleeping timeout must not keep a closed tab (its page, data store and process pool) alive.
+            Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if let i = self.navWaiters.firstIndex(where: { $0.id == id }) {
+                if let self, let i = self.navWaiters.firstIndex(where: { $0.id == id }) {
                     self.navWaiters.remove(at: i).cont.resume(returning: .timeout)
                 }
             }
@@ -696,10 +697,36 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             MainActor.assumeIsolated {
                 cdp?.stop()
+                cdp = nil
+                cdpObserver = nil
+                cookiePersistTimer?.invalidate()
+                cookiePersistTimer = nil
                 watch.destroy()
-                onClose?()
+                releaseWebViews()
+                let done = onClose
+                onClose = nil
+                done?()
             }
         }
+    }
+
+    /// Breaks the reference cycles that keep a closed session alive (the content controller holds this object as a
+    /// script message handler), so WebKit can end the session's helper processes and free its memory.
+    private func releaseWebViews() {
+        for t in tabs {
+            t.webView.navigationDelegate = nil
+            t.webView.uiDelegate = nil
+            t.webView.stopLoading()
+            let ucc = t.webView.configuration.userContentController
+            ucc.removeAllScriptMessageHandlers()
+            ucc.removeAllUserScripts()
+            t.webView.removeFromSuperview()
+        }
+        configuration.userContentController.removeAllScriptMessageHandlers()
+        configuration.userContentController.removeAllUserScripts()
+        tabs.removeAll()
+        current = nil
+        window.contentView = nil
     }
 
     // MARK: persistent cookies

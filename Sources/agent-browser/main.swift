@@ -50,7 +50,11 @@ final class SessionHost {
     private struct Entry { let browser: Browser; let listenFd: Int32; let path: String }
     private var sessions: [String: Entry] = [:]
 
+    /// Set once the last session is gone: the host is on its way out and accepts no new sessions.
+    private(set) var leaving = false
+
     func start(session: String, profile: String?) -> Bool {
+        if leaving { return false }
         if sessions[session] != nil { return true }
         let path = socketPath(session: session)
         if let fd = connectSocket(path) { close(fd); return false }  // an older helper process still owns it
@@ -79,7 +83,11 @@ final class SessionHost {
         guard let e = sessions.removeValue(forKey: session) else { return }
         unlink(e.path)
         close(e.listenFd)
-        if sessions.isEmpty { unlink(hostControlPath()); exit(0) }
+        if sessions.isEmpty {
+            leaving = true
+            unlink(hostControlPath())  // new sessions start a new host from here on
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+        }
     }
 
     /// Sessions idle for 30 minutes are closed, so a forgotten one does not linger.
@@ -116,7 +124,7 @@ func runHost(initialSession: String? = nil, profile: String? = nil) -> Never {
                 let prof = req["profile"] as? String
                 Task { @MainActor in
                     let ok = host.start(session: sanitizeSession(name), profile: prof)
-                    writeAllToSocket(c, jsonString(["ok": ok]) + "\n")
+                    writeAllToSocket(c, jsonString(["ok": ok, "leaving": host.leaving]) + "\n")
                     close(c)
                 }
             }

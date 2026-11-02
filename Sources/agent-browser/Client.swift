@@ -27,7 +27,10 @@ private func startSession(session: String, profile: String?) throws {
             var req: [String: Any] = ["host": "start", "session": session]
             if let profile { req["profile"] = profile }
             writeAllToSocket(fd, jsonString(req) + "\n")
-            if let line = readLineFromSocket(fd), parseJSON(line)?["ok"] as? Bool == true { return }
+            if let line = readLineFromSocket(fd), let r = parseJSON(line) {
+                if r["ok"] as? Bool == true { return }
+                if r["leaving"] as? Bool == true { usleep(150_000); continue }  // that host is exiting; the next try starts a new one
+            }
             throw ClientError(code: "DAEMON_START_FAILED", message: "helper refused to start session \"\(session)\"")
         }
         if !spawned { try spawnHost(); spawned = true }

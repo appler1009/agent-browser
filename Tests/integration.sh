@@ -632,6 +632,7 @@ mline() { echo "$OUT" | sed -n "$1p"; }
 check "mcp browser_note_add saves a note on the open page" '(.result.isError|not) and (.result.content[0].text|test("Press Tab"))' "$(mline 2)"
 check "mcp browser_notes returns both notes" '(.result.content[0].text|test("Login form")) and (.result.content[0].text|test("Press Tab"))' "$(mline 3)"
 check "mcp browser_note_add refuses a credential" '.result.isError==true and (.result.content[0].text|test("NOTE_SENSITIVE"))' "$(mline 4)"
+HPID=$(ab status | jq -r .result.pid)
 ab watch on >/dev/null; nab watch on >/dev/null; sleep 1
 [ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - two shown sessions share one window (tabs)"; } || { FAIL=$((FAIL+1)); echo "FAIL - sessions did not share a window: $(winfo $HPID)"; }
 check "both sessions share one process" '(.result.pid=='"$HPID"')' "$(nab status)"
@@ -639,6 +640,24 @@ nab watch off >/dev/null; sleep 0.5
 [ "$(winfo $HPID)" = "1" ] && { PASS=$((PASS+1)); echo "ok   - hiding one session keeps the other shown"; } || { FAIL=$((FAIL+1)); echo "FAIL - hiding one session changed the other: $(winfo $HPID)"; }
 ab watch off >/dev/null; sleep 0.5
 nab close >/dev/null 2>&1
+
+# --- closing a session frees it; close-then-open right away works ---------
+LK="$AGENT_BROWSER_SESSION-leak"
+lab() { AGENT_BROWSER_SESSION="$LK$1" "$BIN" "${@:2}"; }
+for i in 1 2 3 4 5; do R=$(lab x open "file://$FIX/login.html"); [ "$(echo "$R" | jq -r .ok)" = true ] || break; lab x close >/dev/null; done
+check "five open/close cycles in a row all work" '.ok' "$R"
+if command -v heap >/dev/null 2>&1; then
+  lab keep open "file://$FIX/login.html" >/dev/null
+  LHP=$(lab keep status | jq -r .result.pid)
+  hc() { heap "$LHP" 2>/dev/null | awk -v c="$1" '$4==c{print $1}' | head -1; }
+  NB0=$(hc Browser); NT0=$(hc Tab)
+  for i in 1 2 3 4; do lab "a$i" open "file://$FIX/login.html" >/dev/null; lab "a$i" snapshot >/dev/null; done
+  for i in 1 2 3 4; do lab "a$i" close >/dev/null; done
+  sleep 3
+  NB=$(hc Browser); NT=$(hc Tab)
+  [ "${NB:-99}" -le "$((${NB0:-0} + 1))" ] && [ "${NT:-99}" -le "$((${NT0:-0} + 1))" ] && { PASS=$((PASS+1)); echo "ok   - closed sessions are freed (browsers $NB0 -> $NB, tabs $NT0 -> $NT)"; } || { FAIL=$((FAIL+1)); echo "FAIL - closed sessions linger: browsers $NB0 -> $NB, tabs $NT0 -> $NT"; }
+  lab keep close >/dev/null
+fi
 
 # --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then
