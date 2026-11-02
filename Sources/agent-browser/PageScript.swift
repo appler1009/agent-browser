@@ -218,6 +218,32 @@ let pageScript = #"""
     return { x, y };
   }
 
+  // ---- human checks (CAPTCHA and similar) ----------------------------------
+  // Advisory only: returns {kind, reason} when the page looks like it wants a person, else null.
+  API.humanCheck = function () {
+    function visible(el) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) return false;
+      const c = getComputedStyle(el);
+      return c.display !== 'none' && c.visibility !== 'hidden' && c.opacity !== '0';
+    }
+    try {
+      for (const f of document.querySelectorAll('iframe')) {
+        const src = (f.getAttribute('src') || '').toLowerCase();
+        if (/recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkoselabs|funcaptcha|geetest|captcha-delivery|px-captcha/.test(src)
+            && !/size=invisible/.test(src) && visible(f)) return { kind: 'captcha', reason: 'a CAPTCHA frame is showing' };
+      }
+      for (const el of document.querySelectorAll('.g-recaptcha, .h-captcha, .cf-turnstile, [id*="captcha" i], [class*="captcha" i]')) {
+        if (el.closest('.grecaptcha-badge')) continue;
+        if (visible(el)) return { kind: 'captcha', reason: 'a CAPTCHA element is showing' };
+      }
+      const t = (document.body && document.body.innerText || '').slice(0, 20000);
+      if (/verify (that )?you('| a)re (a )?human|are you a robot|not a robot|checking your browser|unusual traffic|press (and|&) hold|\bcaptcha\b|보안문자|자동입력 ?방지|로봇이 아닙니다|캡차/i.test(t))
+        return { kind: 'captcha', reason: 'the page asks to prove you are human' };
+    } catch (e) {}
+    return null;
+  };
+
   // ---- snapshot ----------------------------------------------------------
   API.snapshot = function (id, opts) {
     opts = opts || {};

@@ -11,7 +11,10 @@ Actions fail loudly: ELEMENT_COVERED names the element in the way, ELEMENT_HIDDE
 VALIDATION_FAILED explain why nothing happened. Every result lists page events (navigation, dialogs, console \
 errors, failed requests). To sign in, use browser_vault_list then browser_login or browser_fill_secret; you \
 never see passwords or codes and must not ask for them. Use browser_wait (selector, text, url, idle) instead of sleeping. browser_watch \
-shows a live window the user can pause to take over.
+shows a live window the user can pause to take over. If a CAPTCHA, a \"verify you are human\" check or a device/SMS \
+confirmation appears (CAPTCHAs are flagged with needs_human in results), do not try to solve or bypass it: call browser_watch \
+with on, then pause, tell the user exactly what to do on the page and wait until they say it is done, then \
+resume and snapshot again.
 """
 
 private func tool(_ name: String, _ description: String, _ props: [String: Any] = [:], required: [String] = []) -> [String: Any] {
@@ -173,7 +176,11 @@ private func callTool(session: String, profile: String?, name: String, arguments
 
     if ok, cmd == "snapshot", let tree = result["tree"] as? String {
         let head = "# \(result["url"] as? String ?? "") — \(result["title"] as? String ?? "") (snapshot s\(result["snapshot"] as? Int ?? 0), \(result["refs"] as? Int ?? 0) refs\(result["truncated"] as? Bool == true ? ", TRUNCATED" : ""))"
-        content.append(text(head + "\n" + tree))
+        var body = head + "\n" + tree
+        if let h = result["needs_human"] as? [String: Any] {
+            body += "\n# NEEDS A HUMAN (\(h["kind"] as? String ?? "check")): \(h["reason"] as? String ?? ""). \(h["hint"] as? String ?? "")"
+        }
+        content.append(text(body))
     } else if ok, cmd == "screenshot", let path = result["path"] as? String, let d = FileManager.default.contents(atPath: path) {
         content.append(["type": "image", "data": d.base64EncodedString(), "mimeType": "image/png"])
         if keep { content.append(text(jsonString(["path": path]))) } else { try? FileManager.default.removeItem(atPath: path) }

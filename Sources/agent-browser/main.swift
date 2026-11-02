@@ -36,6 +36,7 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   mcp                              run as an MCP server on stdio (same tools, for Claude Code, Cursor, ...)
 --profile NAME keeps cookies/storage between runs (default: temporary, discarded on close).
 Every command prints one JSON object: {ok, result, events, error}.
+If a result has needs_human (CAPTCHA, "prove you are human"), do not try to solve it: watch on, watch pause, ask the user to complete it, then watch resume.
 """
 
 // MARK: - daemon
@@ -284,6 +285,9 @@ if textOnly, let r = parseJSON(line), r["ok"] as? Bool == true,
    let res = r["result"] as? [String: Any], let tree = res["tree"] as? String {
     print("# \(res["url"] as? String ?? "") — \(res["title"] as? String ?? "") (snapshot s\(res["snapshot"] as? Int ?? 0), \(res["refs"] as? Int ?? 0) refs\(res["truncated"] as? Bool == true ? ", TRUNCATED" : ""))")
     print(tree)
+    if let h = res["needs_human"] as? [String: Any] {
+        print("# NEEDS A HUMAN (\(h["kind"] as? String ?? "check")): \(h["reason"] as? String ?? ""). \(h["hint"] as? String ?? "")")
+    }
     exit(0)
 }
 print(line)

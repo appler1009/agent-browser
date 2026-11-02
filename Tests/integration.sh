@@ -299,6 +299,14 @@ elif pgrep -f "menubar --foreground" >/dev/null; then PASS=$((PASS+1)); echo "ok
 else FAIL=$((FAIL+1)); echo "FAIL - menu bar item exited"; fi
 
 
+# --- human checks: CAPTCHA pages get a needs_human hint, ordinary pages do not -------------
+R=$(ab open "file://$FIX/captcha.html");              check "open on a CAPTCHA page carries needs_human" '.ok and .result.needs_human.kind=="captcha" and (.result.needs_human.hint|test("watch pause"))' "$R"
+R=$(ab snapshot --text | tail -1);                    echo "$R" | grep -q "^# NEEDS A HUMAN (captcha)" && { PASS=$((PASS+1)); echo "ok   - text snapshot ends with a NEEDS A HUMAN line"; } || { FAIL=$((FAIL+1)); echo "FAIL - text snapshot lacks the NEEDS A HUMAN line: $R"; }
+R=$(ab status);                                       check "a pending human check makes the session needs_you" '.result.needs_you==true' "$R"
+R=$(ab open "file://$FIX/captcha-badge.html");        check "invisible reCAPTCHA badge and hidden elements are not flagged" '.ok and (.result|has("needs_human")|not)' "$R"
+R=$(ab status);                                       check "needs_you clears once the page is fine" '.result.needs_you==false' "$R"
+R=$(ab open "file://$FIX/login.html");                check "an ordinary page has no needs_human" '.ok and (.result|has("needs_human")|not)' "$R"
+
 # --- vault: credentials for bots -----------------------------------------
 PW='Zq9-vault-pw-1'; PW2='other-pw-4567'; TSECRET='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
 R=$(ab vault selftest);                           check "vault: TOTP matches RFC 6238 vectors" '.ok and .result.selftest=="ok"' "$R"

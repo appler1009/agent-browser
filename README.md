@@ -65,6 +65,7 @@ The first command starts a background helper that owns the page (`close` stops i
 - **`events`** list navigations, loads, redirects, dialogs (auto-accepted), console errors, failed requests, form submits and downloads since the last command.
 - **`retry_safe: true`** means the command had no effect, so it can be run again once the cause is fixed.
 - Common codes: `STALE_REF`, `ELEMENT_COVERED`, `ELEMENT_HIDDEN`, `ELEMENT_DISABLED`, `VALIDATION_FAILED`, `NOT_FILE_INPUT`, `TIMEOUT`, `NAVIGATION_FAILED`, `NO_SUCH_TAB`; vault: `ORIGIN_MISMATCH`, `VAULT_NO_ENTRY`, `VAULT_APPROVAL_DENIED`, `VAULT_NEEDS_TTY`, `NO_LOGIN_FIELDS`, `TOTP_NOT_FOUND`, `TOTP_AMBIGUOUS`.
+- **`needs_human`** appears in a result when the page looks like a CAPTCHA or a "prove you are human" check. Agents are told not to solve or bypass it: they run `watch on` and `watch pause`, ask you to complete it, then `watch resume`. The session shows as needing you in the menu bar. It is a heuristic hint, not an error.
 - Snapshot ids are unique across tabs, so a ref can never act on the wrong page.
 
 ## MCP
@@ -123,7 +124,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 210 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 216 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

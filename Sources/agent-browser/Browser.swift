@@ -503,7 +503,16 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         if drain { runningLabel = label }
         defer { if drain { runningLabel = nil } }
         do {
-            let result = try await run(cmd, args)
+            var result = try await run(cmd, args)
+            if drain, Browser.humanCheckCommands.contains(cmd) {
+                humanCheckPending = false
+                if let h = try? await js("return window.__abApi && window.__abApi.humanCheck ? window.__abApi.humanCheck() : null") as? [String: Any],
+                   let kind = h["kind"] as? String {
+                    humanCheckPending = true
+                    result["needs_human"] = ["kind": kind, "reason": h["reason"] as? String ?? "",
+                        "hint": "Do not try to solve or bypass this. Run watch on, then watch pause, tell the user what to do on the page and wait for them to say it is done, then watch resume and snapshot again."]
+                }
+            }
             if drain { watch.step("\(label) → \(stepSummary(result))", ok: true) }
             return ["ok": true, "result": result, "events": events()]
         } catch let e as CmdError {
@@ -752,6 +761,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     // What the menu bar item shows. Updated by execute() and unlock().
     private var runningLabel: String?
     private var waitingForHuman = false
+    private var humanCheckPending = false
+    private static let humanCheckCommands: Set<String> = ["open", "snapshot", "click", "submit", "fill", "login", "wait", "tab"]
     private var approvalFor: String?
     private let startedAt = Date()
 
@@ -762,7 +773,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             "tabs": tabs.count, "current_tab": current.id, "watching": watch.visible, "paused": watch.paused,
             "downloads_dir": Browser.downloadDir.path,
             "url": current.webView.url?.absoluteString ?? "", "title": current.webView.title ?? "",
-            "state": state, "needs_you": waitingForHuman || approvalFor != nil,
+            "state": state, "needs_you": waitingForHuman || approvalFor != nil || humanCheckPending,
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
             "recent_steps": watch.recentSteps.suffix(8).map { $0 },
         ]
