@@ -37,6 +37,19 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Check notarization credentials
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          # Names only, never values. A release must not silently go out unnotarized.
+          [ -n "$ASC_KEY_ID" ]     || { echo "::error::secret ASC_KEY_ID is empty or missing"; bad=1; }
+          [ -n "$ASC_ISSUER_ID" ]  || { echo "::error::secret ASC_ISSUER_ID is empty or missing"; bad=1; }
+          if [ -z "$ASC_KEY_P8" ]; then echo "::error::secret ASC_KEY_P8 is empty or missing"; bad=1
+          elif ! printf '%s' "$ASC_KEY_P8" | base64 --decode 2>/dev/null | head -c 40 | grep -q 'BEGIN PRIVATE KEY'; then
+            echo "::error::secret ASC_KEY_P8 is not the base64 of an AuthKey .p8 file (expected: base64 -i AuthKey_XXXX.p8)"; bad=1
+          fi
+          [ -z "${bad:-}" ]
+
       - name: Set up code signing
         uses: ./.github/actions/setup-signing
         with:
@@ -47,7 +60,8 @@ jobs:
 
       - name: Build, sign, test, notarize, package
         env:
-          REQUIRE_DMG_STYLE: '1'   # never ship a DMG without its background
+          REQUIRE_DMG_STYLE: '1'        # never ship a DMG without its background
+          REQUIRE_NOTARIZATION: '1'     # nor an unnotarized build
         run: Scripts/package.sh
 
       - name: Keep the files from a dry run

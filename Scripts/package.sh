@@ -11,7 +11,8 @@
 # The signed binary is run through Tests/integration.sh before it is packaged (SKIP_TESTS=1 to skip),
 # so what ships is what was tested.
 #
-# Notarization runs when credentials are available, otherwise it is skipped with a warning:
+# Notarization runs when credentials are available, otherwise it is skipped with a warning (an error when
+# REQUIRE_NOTARIZATION=1, which the release workflow sets):
 #   - CI: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH (App Store Connect API key), or
 #   - local: a keychain profile, stored once with
 #       xcrun notarytool store-credentials "AgentBrowser-Notary" \
@@ -109,6 +110,9 @@ if [ -z "${SKIP_SIGNING:-}" ]; then
     NOTARY_AUTH=(--key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID")
   elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
     NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+  elif [ -n "${REQUIRE_NOTARIZATION:-}" ]; then
+    echo "error: no notarization credentials (keychain profile '$NOTARY_PROFILE' or ASC_* env) and REQUIRE_NOTARIZATION is set" >&2
+    exit 1
   else
     echo "warning: no notarization credentials (keychain profile '$NOTARY_PROFILE' or ASC_* env);"
     echo "         the app, the DMG and the binary are signed but not notarized. See the header of this script."
