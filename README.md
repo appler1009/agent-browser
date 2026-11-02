@@ -52,6 +52,7 @@ The first command starts a background helper that owns the page (`close` stops i
 | `vault list` / `audit` (`add`, `rm`, `export` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
 | `sessions` | every running session with its state; never starts one |
 | `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
+| `note list` / `show <host>` / `add <host> "text"` / `rm <host> <id>` | short how-to notes per site that agents read before working and add when they work something out, see [Notes](#notes-per-site) |
 | `policy [show]` / `check` (`set`, `reset` are for you) | limits on hosts, private addresses, tabs, downloads and dialogs, see [Policy](#policy-limits-you-set) |
 | `status`, `cdp`, `mcp`, `close` | |
 
@@ -77,7 +78,7 @@ The first command starts a background helper that owns the page (`close` stops i
 claude mcp add agent-browser -- /path/to/agent-browser mcp
 ```
 
-25 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
+27 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
 
 ## Menu bar
 
@@ -104,6 +105,12 @@ agent-browser fill @s1:e4 --secret github --field password
 - **Not combined with DevTools:** a session that typed secrets refuses `cdp start`, and entries are refused while it runs, since a DevTools client could read the page.
 
 The vault protects the password and the TOTP seed. A setup page shows its key before enrollment, so an agent that screenshots it first can still see the QR code; recovery codes are visible to an agent that reads that page before `recovery save` (afterwards they are redacted from output). It does not hide the signed-in session itself (`cookies export` still returns session cookies), a visible one-time code can show up in a screenshot, and a compromised site you allowed can read what you type into it.
+
+## Notes per site
+
+Notes are short how-to hints for a site ("search is behind the magnifier icon", "dismiss the cookie banner first"), kept per host in `~/.agent-browser/notes/<host>.json` (owner-only, outside any repository). When a page on a host that has notes is opened, the result carries a `notes` hint; an agent reads them with `browser_notes` (or `agent-browser note show --here`) and adds what it works out with `browser_note_add` (or `note add --here "text"`). Notes for `example.com` also apply to `shop.example.com`. They are shown to agents as data, not instructions.
+
+Text that looks private is refused with `NOTE_SENSITIVE`: email addresses, `password: …` style values, one-time codes, authenticator links, token-like strings and long numbers. Limits: 600 characters per note, 25 notes per host. You can review and remove notes any time with `note list`, `note show <host>` and `note rm <host> <id>`.
 
 ## Policy (limits you set)
 

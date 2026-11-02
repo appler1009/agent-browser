@@ -589,6 +589,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         defer { if drain { runningLabel = nil } }
         do {
             var result = try await run(cmd, args)
+            if drain, ["open", "snapshot", "tab"].contains(cmd), let u = current.webView.url, u.scheme == "http" || u.scheme == "https",
+               let h = u.host.flatMap({ NoteStore.normalizeHost($0) }) {
+                let n = NoteStore.applicable(h).reduce(0) { $0 + $1.notes.count }
+                if n > 0 { result["notes"] = ["count": n, "host": h, "hint": "Notes about this site are saved: read them with note show --here (CLI) or browser_notes (MCP) before you continue."] }
+            }
             if drain, Browser.humanCheckCommands.contains(cmd) {
                 humanCheckPending = false
                 if let h = try? await js("return window.__abApi && window.__abApi.humanCheck ? window.__abApi.humanCheck() : null") as? [String: Any],
@@ -645,6 +650,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "enroll": return try await enrollTOTP(args)
         case "recovery": return try await saveRecovery(args)
         case "vault": return try vaultList()
+        case "note": return try noteCommand(args)
         case "submit": return try await act("submit", ref: try str(args, "ref"), arg: "")
         case "upload": return try await upload(args)
         case "wait": return try await wait(args)
@@ -874,6 +880,22 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             }
         }
         return ["blocking": blockRules.map(\.label), "applies_to": "requests made from now on (reload to apply to the current page)"]
+    }
+
+    /// `note` from the MCP server: notes for a host (default: the page that is open).
+    private func noteCommand(_ args: [String: Any]) throws -> [String: Any] {
+        var host = (args["host"] as? String).flatMap { NoteStore.normalizeHost($0) }
+        if host == nil, (args["host"] as? String ?? "").isEmpty, let u = current.webView.url, u.scheme == "http" || u.scheme == "https" {
+            host = u.host.flatMap { NoteStore.normalizeHost($0) }
+        }
+        guard let h = host else { throw CmdError(code: "NOTE_NO_HOST", message: "no host given and the current page is not a web page") }
+        switch args["action"] as? String ?? "show" {
+        case "add":
+            let n = try NoteStore.add(host: h, text: try str(args, "text"))
+            return ["host": h, "note": n.json]
+        default:
+            return notesResult(host: h)
+        }
     }
 
     private func watchCommand(_ args: [String: Any]) throws -> [String: Any] {

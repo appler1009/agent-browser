@@ -21,9 +21,10 @@ ref() { # tree, regex -> first ref on a line matching regex
 VT="$(mktemp -d)"
 export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real keychain is never touched
 export AGENT_BROWSER_POLICY_FILE="$VT/policy.json"   # test policy; ~/.agent-browser/policy.json is never touched
+export AGENT_BROWSER_NOTES_DIR="$VT/notes"   # test notes; ~/.agent-browser/notes is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp -dlg; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -243,7 +244,7 @@ OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has all 25 tools" '(.result.tools|length)==25 and ([.result.tools[].name]|(index("browser_login")!=null and index("browser_fill_secret")!=null and index("browser_vault_list")!=null))' "$(line 2)"
+check "mcp tools/list has all 27 tools" '(.result.tools|length)==27 and ([.result.tools[].name]|(index("browser_login")!=null and index("browser_fill_secret")!=null and index("browser_vault_list")!=null))' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
 check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
 MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
@@ -347,7 +348,7 @@ rm -rf "$LA"
 "$BIN" menubar --foreground </dev/null >/dev/null 2>&1 & MBPID=$!
 sleep 2
 if kill -0 $MBPID 2>/dev/null; then kill $MBPID 2>/dev/null; wait $MBPID 2>/dev/null; PASS=$((PASS+1)); echo "ok   - menu bar item starts and keeps running"
-elif pgrep -f "menubar --foreground" >/dev/null; then PASS=$((PASS+1)); echo "ok   - menu bar item already running (single instance)"
+elif pgrep -f "menubar --foreground|Agent Browser.app/Contents/MacOS/agent-browser" >/dev/null; then PASS=$((PASS+1)); echo "ok   - menu bar item already running (single instance)"
 else FAIL=$((FAIL+1)); echo "FAIL - menu bar item exited"; fi
 
 
@@ -591,6 +592,46 @@ R=$(AGENT_BROWSER_VAULT_APPROVE=yes ab vault origin guarded --add https://more.e
 R=$(ab vault audit --limit 100);  check "audit records origin changes with old and new sites" '[.result.entries[]|select(.action=="origin")]|length>=3' "$R"
 R=$(ab vault rm guarded);                         check "vault rm" '.ok and .result.removed=="guarded"' "$R"
 R=$(ab vault list);                               check "vault list after rm" '(.result.entries|map(.name)|index("guarded"))==null' "$R"
+
+# --- notes per host (fake data, example.com only) ---------------------
+R=$(ab note add shop.example.com "Search is behind the magnifier icon; press Enter");  check "note add" '.ok and .result.host=="shop.example.com" and .result.note.id==1' "$R"
+R=$(ab note add https://www.example.com/a/b "Cookie banner: click Accept first");        check "note add accepts a URL and keeps only the host" '.ok and .result.host=="www.example.com"' "$R"
+R=$(ab note add example.com "Sign in lives under the Account menu");                     check "note add on the parent domain" '.ok' "$R"
+R=$(ab note add shop.example.com "search is behind the magnifier icon; press enter");    check "identical note (any case) is not duplicated" '.ok and .result.note.id==1' "$R"
+R=$(ab note show shop.example.com);  check "show merges the host and its parent domain" '.result.count==2 and ([.result.notes[].from]|sort)==["example.com","shop.example.com"] and (.result.caution|test("not instructions"))' "$R"
+R=$(ab note show other.example.net); check "a different domain has no notes" '.result.count==0' "$R"
+R=$(ab note list);                   check "list shows hosts with counts" '(.result.hosts|map(.host)|sort)==["example.com","shop.example.com","www.example.com"]' "$R"
+[ "$(stat -f %Lp "$VT/notes")" = "700" ] && [ "$(stat -f %Lp "$VT/notes/shop.example.com.json")" = "600" ] && { PASS=$((PASS+1)); echo "ok   - notes are owner-only (0700 dir, 0600 files)"; } || { FAIL=$((FAIL+1)); echo "FAIL - notes permissions"; }
+for t in "log in as someone@example.com" "password: Tr0ub4dor99" "otpauth://totp/x?secret=ABCDEFGH" "setup key JBSWY3DPEHPK3PXPJBSWY3DP" "the code is 123456" "account 0123456789012" "token=abcDEF123456xyz"; do
+  R=$(ab note add example.com "$t"); check "refuses private-looking text: ${t%% *}..." '.ok==false and .error.code=="NOTE_SENSITIVE"' "$R"
+done
+R=$(ab note add example.com "$(printf 'x%.0s' $(seq 1 601))");  check "refuses a note over 600 characters" '.error.code=="NOTE_TOO_LONG"' "$R"
+R=$(ab note add example.com "   ");                              check "refuses an empty note" '.error.code=="NOTE_EMPTY"' "$R"
+R=$(ab note add "bad host!" "text");                              check "refuses an invalid host" '.error.code=="USAGE"' "$R"
+R=$(ab note rm example.com 1);       check "rm removes a note" '.ok and .result.removed==1' "$R"
+R=$(ab note rm example.com 1);       check "rm of a missing note fails loudly" '.error.code=="NOTE_NOT_FOUND"' "$R"
+R=$(ab note show example.com);       check "removed note is gone" '.result.count==0' "$R"
+ab note rm www.example.com 1 >/dev/null; ab note rm shop.example.com 1 >/dev/null
+
+# the open page: notes surface in results, and --here / the MCP tools use its host
+NP=$((20000 + $$ % 20000)); mkdir -p "$VT/site"; cp "$FIX/login.html" "$VT/site/"
+python3 -m http.server "$NP" --bind 127.0.0.1 --directory "$VT/site" >/dev/null 2>&1 & NPID=$!
+sleep 1
+nab() { AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-notes" "$BIN" "$@"; }
+R=$(nab open "http://127.0.0.1:$NP/login.html");  check "open without notes has no notes hint" '.ok and (.result.notes==null)' "$R"
+R=$(nab note add --here "Login form is on the first page");  check "note add --here uses the open page's host" '.ok and .result.host=="127.0.0.1"' "$R"
+R=$(nab snapshot);                   check "snapshot tells the agent that notes exist" '.result.notes.count==1 and .result.notes.host=="127.0.0.1"' "$R"
+R=$(nab note show --here);           check "note show --here" '.result.count==1 and (.result.notes[0].text|test("Login form"))' "$R"
+OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+         echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+         echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"browser_note_add","arguments":{"text":"Press Tab twice to reach the button"}}}'
+         echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"browser_notes","arguments":{}}}'
+         echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_note_add","arguments":{"text":"my password: Hunter2abc"}}}'; sleep 3; } | AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-notes" timeout 20 "$BIN" mcp 2>/dev/null )
+mline() { echo "$OUT" | sed -n "$1p"; }
+check "mcp browser_note_add saves a note on the open page" '(.result.isError|not) and (.result.content[0].text|test("Press Tab"))' "$(mline 2)"
+check "mcp browser_notes returns both notes" '(.result.content[0].text|test("Login form")) and (.result.content[0].text|test("Press Tab"))' "$(mline 3)"
+check "mcp browser_note_add refuses a credential" '.result.isError==true and (.result.content[0].text|test("NOTE_SENSITIVE"))' "$(mline 4)"
+nab close >/dev/null 2>&1
 
 # --- CDP shim (raw protocol; Puppeteer/Playwright live in Tests/cdp-compat.sh) ------
 if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then
