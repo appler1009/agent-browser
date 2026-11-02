@@ -87,7 +87,10 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     func show() {
         visible = true
-        let screen = NSScreen.main ?? NSScreen.screens.first
+        // The screen the pointer is on, so the window appears where the person is looking
+        // (NSScreen.main can be another display for a background app).
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main ?? NSScreen.screens.first
         let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let chrome = Self.toolbarH + Self.timelineH
         let scale = min(1, (vis.width - 40) / vp.width, (vis.height - 60 - chrome) / vp.height)
