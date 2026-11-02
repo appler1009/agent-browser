@@ -52,7 +52,7 @@ The first command starts a background helper that owns the page (`close` stops i
 | `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
 | `status`, `cdp`, `mcp`, `close` | |
 
-`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Exported cookie files are written `0600`.
+`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Besides WebKit's own store, the helper keeps the profile's persistent cookies in `~/.agent-browser/profiles/NAME/cookies.json` (owner-only), because WebKit on some macOS versions doesn't write its store before the helper exits. Exported cookie files are written `0600`.
 
 ## What agents get back
 

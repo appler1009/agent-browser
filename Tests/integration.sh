@@ -21,7 +21,7 @@ ref() { # tree, regex -> first ref on a line matching regex
 VT="$(mktemp -d)"
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof"' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -186,7 +186,10 @@ if [ "$FAIL" -gt "$F0" ]; then  # help diagnose runner-specific storage behaviou
   echo "       macOS $(sw_vers -productVersion); recently written WebKit/cookie files:"
   find "$HOME/Library" -type f -mmin -3 \( -iname '*cookie*' -o -path '*WebKit*' -o -path '*HTTPStorages*' \) 2>/dev/null | head -20 | sed 's/^/         /'
 fi
+[ "$(stat -f %Lp "$HOME/.agent-browser/profiles/$PN/cookies.json" 2>/dev/null)" = "600" ] && [ "$(stat -f %Lp "$HOME/.agent-browser/profiles/$PN")" = "700" ] && { PASS=$((PASS+1)); echo "ok   - profile cookie file is owner-only"; } || { FAIL=$((FAIL+1)); echo "FAIL - profile cookie file permissions"; }
 pab cookies clear >/dev/null; pab close >/dev/null; sleep 1.5
+R=$(pab cookies export);                          check "cleared cookies do not come back after a restart" '.result.count==0' "$R"
+pab close >/dev/null; sleep 1.5
 R=$(AGENT_BROWSER_SESSION="$PS" "$BIN" cookies export); check "a temporary session does not see the profile's cookies" '.result.count==0' "$R"
 AGENT_BROWSER_SESSION="$PS" "$BIN" close >/dev/null
 

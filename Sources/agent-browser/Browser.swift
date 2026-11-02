@@ -286,6 +286,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
 
         let first = openTab(configuration: config, attach: false)
         watch = WatchWindow(window: window, webView: first.webView, session: daemonSession)
+        if cookieFile != nil { cookieRestore = Task { await restoreCookies() } }
     }
 
     // MARK: tabs
@@ -478,6 +479,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
 
     private func execute(_ req: [String: Any], drain: Bool) async -> [String: Any] {
         lastActivity = Date()
+        await cookieRestore?.value
         let cmd = req["cmd"] as? String ?? ""
         let args = req["args"] as? [String: Any] ?? [:]
         func events() -> [[String: Any]] { drain ? drainEvents() : [] }
@@ -568,7 +570,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             let sock = daemonSocketPath
             // Persistent profiles need time to flush cookies/storage to disk. A round trip to the network
             // process first makes sure it has seen every recent cookie change; the pause lets it write them.
-            if daemonProfile != nil { await flushCookies() }
+            if daemonProfile != nil { await flushCookies(); await persistCookies() }
             let delay = daemonProfile == nil ? 0.1 : 2.0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 if !sock.isEmpty { unlink(sock) }
@@ -577,6 +579,50 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             return ["closed": true]
         default:
             throw CmdError(code: "USAGE", message: "unknown command \"\(cmd)\"")
+        }
+    }
+
+    // MARK: persistent cookies
+    //
+    // A persistent profile keeps WebKit's own store, but WebKit on some macOS versions (15.x) does not write
+    // cookies to disk before the helper exits. So the helper also keeps the persistent (non-session) cookies
+    // in the profile folder itself and loads them at startup. File and folder are owner-only.
+
+    private var cookieRestore: Task<Void, Never>?
+    private var cookiePersistTimer: Timer?
+
+    private var cookieFile: String? {
+        daemonProfile.map { NSHomeDirectory() + "/.agent-browser/profiles/\($0)/cookies.json" }
+    }
+
+    private func restoreCookies() async {
+        guard let file = cookieFile else { return }
+        let store = configuration.websiteDataStore.httpCookieStore
+        if let data = FileManager.default.contents(atPath: file),
+           let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+            for d in list {
+                if let e = (d["expires"] as? NSNumber)?.doubleValue, Date(timeIntervalSince1970: e) < Date() { continue }
+                if let c = makeCookie(d) { await store.setCookie(c) }
+            }
+        }
+        // Save changes made while browsing, in case the helper is killed instead of closed.
+        cookiePersistTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.persistCookies() }
+        }
+    }
+
+    func persistCookies() async {
+        guard let file = cookieFile else { return }
+        let now = Date()
+        let keep = await configuration.websiteDataStore.httpCookieStore.allCookies()
+            .filter { ($0.expiresDate ?? .distantPast) > now }
+            .map(cookieDict)
+            .sorted { ($0["domain"] as? String ?? "") < ($1["domain"] as? String ?? "") }
+        let dir = (file as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if let data = try? JSONSerialization.data(withJSONObject: keep, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+            try? data.write(to: URL(fileURLWithPath: file), options: .atomic)
+            chmod(file, 0o600)
         }
     }
 
@@ -1228,10 +1274,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             for d in list {
                 if let c = makeCookie(d) { await store.setCookie(c); n += 1 } else { skipped += 1 }
             }
+            await persistCookies()
             return ["imported": n, "skipped": skipped]
         case "clear":
             let all = await store.allCookies()
             for c in all { await store.deleteCookie(c) }
+            await persistCookies()
             return ["cleared": all.count]
         default:
             throw CmdError(code: "USAGE", message: "cookies takes export [path] | import <path> | clear")

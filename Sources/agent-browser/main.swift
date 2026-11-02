@@ -75,7 +75,10 @@ func runDaemon(session: String) -> Never {
     // Exit after 30 idle minutes so a forgotten helper does not linger.
     Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
         MainActor.assumeIsolated {
-            if Date().timeIntervalSince(browser.lastActivity) > 30 * 60 { unlink(path); exit(0) }
+            if Date().timeIntervalSince(browser.lastActivity) > 30 * 60 {
+                unlink(path)
+                Task { @MainActor in await browser.persistCookies(); exit(0) }
+            }
         }
     }
     app.run()
