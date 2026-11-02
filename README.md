@@ -62,7 +62,7 @@ The first command starts a background helper that owns the page (`close` stops i
 - **`outcome`** says what an action did: `navigated: /done`, `dialog: …`, `download: file (N bytes)`, `opened tab t2`, `submitted`, `dom-changed` or `no-op`.
 - **`events`** list navigations, loads, redirects, dialogs (auto-accepted), console errors, failed requests, form submits and downloads since the last command.
 - **`retry_safe: true`** means the command had no effect, so it can be run again once the cause is fixed.
-- Common codes: `STALE_REF`, `ELEMENT_COVERED`, `ELEMENT_HIDDEN`, `ELEMENT_DISABLED`, `VALIDATION_FAILED`, `NOT_FILE_INPUT`, `TIMEOUT`, `NAVIGATION_FAILED`, `NO_SUCH_TAB`.
+- Common codes: `STALE_REF`, `ELEMENT_COVERED`, `ELEMENT_HIDDEN`, `ELEMENT_DISABLED`, `VALIDATION_FAILED`, `NOT_FILE_INPUT`, `TIMEOUT`, `NAVIGATION_FAILED`, `NO_SUCH_TAB`; vault: `ORIGIN_MISMATCH`, `VAULT_NO_ENTRY`, `VAULT_APPROVAL_DENIED`, `VAULT_NEEDS_TTY`, `NO_LOGIN_FIELDS`, `TOTP_NOT_FOUND`, `TOTP_AMBIGUOUS`.
 - Snapshot ids are unique across tabs, so a ref can never act on the wrong page.
 
 ## MCP
@@ -87,7 +87,7 @@ agent-browser fill @s1:e4 --secret github --field password
 - **Locked to the site.** An entry only works on its own origin (https, or http on localhost); elsewhere you get `ORIGIN_MISMATCH` and nothing is typed. The check also runs inside the page at fill time.
 - **`vault add` and `rm` need an interactive terminal**, so a program cannot create, replace or delete entries. Replacing an entry means typing the password again.
 - **`--totp`** stores a base32 secret or `otpauth://` URI; `login` fills the current code. **`--confirm`** asks for Touch ID or your password on every use.
-- **Signing up with 2FA:** on the setup page, `totp enroll github` reads the QR code (decoded with Vision), the `otpauth://` link or the setup key and saves it into the entry; the agent never receives it, and snapshots hide setup keys and links. It refuses to guess if the page shows different secrets. Then `fill REF --secret github --field totp` types the first code. `recovery save github` stores the recovery codes the same way (`--selector CSS` if they aren't found automatically).
+- **Signing up with 2FA:** on the setup page, `totp enroll github` reads the QR code (decoded with Vision), the `otpauth://` link or the setup key and saves it into the entry; the agent never receives it, and snapshots hide setup keys and links. It refuses to guess if the page shows different secrets. Then `fill REF --secret github --field totp` types the first code. `recovery save github` stores the recovery codes the same way (`--selector CSS` if they aren't found automatically). You can also enter them yourself with `vault recovery github`.
 - **Your own backup:** `agent-browser vault export github [--qr]` (terminal only, asks for Touch ID or your password) prints the TOTP secret, the `otpauth://` link, the current code and the recovery codes, and can draw a QR code to scan into your own authenticator. Store that in your password manager or print it; the vault lives only in this Mac's login keychain and does not sync.
 - **Audit:** every use is logged without values to `~/.agent-browser/vault-audit.log` (`vault audit`).
 - **Not combined with DevTools:** a session that typed secrets refuses `cdp start`, and entries are refused while it runs, since a DevTools client could read the page.
@@ -116,7 +116,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈20 s; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈25 s, 184 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 
