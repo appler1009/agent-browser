@@ -15,7 +15,7 @@ Requires macOS 14+. Not a Chrome replacement: WebKit quirks apply, and there is 
 swift build -c release            # binary at .build/release/agent-browser
 ```
 
-Tagged releases ship a signed, notarized universal binary (see [Release](#release)).
+Tagged releases ship a signed, universal binary. It is not notarized, so Gatekeeper warns on first run; clear the quarantine flag with `xattr -d com.apple.quarantine agent-browser` (see [Release](#release)).
 
 ## Quick start
 
@@ -122,7 +122,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 196 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 198 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 
@@ -130,7 +130,7 @@ Set `AGENT_BROWSER_CDP_TRACE=<file>` before starting the helper to log DevTools 
 
 ### Release
 
-`Scripts/package.sh` builds a universal binary, signs it (Developer ID, Hardened Runtime), runs the integration tests against the signed binary, notarizes it and writes `dist/agent-browser-<version>-macos.tar.gz`. Locally it uses the Developer ID identity from your keychain (team in a git-ignored `.signing.local`); notarization needs an `AgentBrowser-Notary` keychain profile or `ASC_*` variables. Pushing a tag `vX.Y.Z` matching `VERSION` runs `.github/workflows/release.yml`, which needs the repository secrets `TEAM_ID`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PWD`, `KEYCHAIN_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`. Keep `VERSION` and `Sources/agent-browser/Version.swift` in step.
+`Scripts/package.sh` builds a universal binary, signs it (Developer ID, Hardened Runtime), runs the integration tests against the signed binary, notarizes it when credentials are available (otherwise it warns and skips) and writes `dist/agent-browser-<version>-macos.tar.gz`. Locally it uses the Developer ID identity from your keychain (team in a git-ignored `.signing.local`); notarization needs an `AgentBrowser-Notary` keychain profile or `ASC_*` variables. Pushing a tag `vX.Y.Z` matching `VERSION` runs `.github/workflows/release.yml`, which needs the repository secrets `TEAM_ID`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PWD` and `KEYCHAIN_PASSWORD`; add `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8` to also notarize. Keep `VERSION` and `Sources/agent-browser/Version.swift` in step.
 
 ## License
 
