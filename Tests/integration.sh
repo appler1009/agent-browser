@@ -139,6 +139,25 @@ F=$(echo "$R" | jq -r .result.download.path)
 R=$(ab open "file://$FIX/blob.bin");              check "open on a non-displayable URL downloads it" '.ok and (.result.outcome|test("^download: blob.bin \\(2048 bytes\\)"))' "$R"
 R=$(ab downloads);                                check "downloads lists both as done" '(.result.downloads|length==2) and (.result.downloads|all(.state=="done"))' "$R"
 R=$(ab wait --download --timeout 2000);           check "wait --download returns when done" '.ok' "$R"
+xattr -p com.apple.quarantine "$F" >/dev/null 2>&1 && { PASS=$((PASS+1)); echo "ok   - downloaded file carries the quarantine flag"; } || { FAIL=$((FAIL+1)); echo "FAIL - downloaded file has no quarantine flag"; }
+R=$(ab downloads);                                check "downloads reports quarantined" '.result.downloads|all(.quarantined==true)' "$R"
+# download caps from the policy
+ab policy set --max-downloads 3 >/dev/null
+ab open "file://$FIX/download.html" >/dev/null; T=$(ab snapshot | jq -r .result.tree); DL=$(ref "$T" 'link')
+R=$(ab click "$DL");                              check "third download is within max_downloads" '.ok and (.result.outcome|test("^download: "))' "$R"
+ab open "file://$FIX/download.html" >/dev/null; T=$(ab snapshot | jq -r .result.tree); DL=$(ref "$T" 'link')
+R=$(ab click "$DL");                              check "fourth download is blocked by max_downloads" '.ok and (.result.outcome|test("^download-failed: .*max_downloads"))' "$R"
+R=$(ab open "file://$FIX/blob.bin");              check "open of a blocked download fails with DOWNLOAD_FAILED" '.ok==false and .error.code=="DOWNLOAD_FAILED"' "$R"
+if command -v python3 >/dev/null; then
+  ab policy set --max-downloads 20 --max-download-mb 1 >/dev/null
+  DP=$((20000 + RANDOM % 20000)); python3 "$FIX/download_server.py" $DP >/dev/null 2>&1 & DPID=$!; sleep 1
+  R=$(ab open "http://127.0.0.1:$DP/sized");      check "download announced as over max_download_mb is refused" '.ok==false and .error.code=="DOWNLOAD_FAILED" and (.error.message|test("max_download_mb"))' "$R"
+  R=$(ab open "http://127.0.0.1:$DP/stream");     check "download without a size is cut off at max_download_mb" '.ok==false and .error.code=="DOWNLOAD_FAILED" and (.error.message|test("max_download_mb"))' "$R"
+  R=$(ab downloads); LEFT=$(echo "$R" | jq -r '[.result.downloads[]|select(.state=="failed")|.path]|map(select(.!=""))|.[]' | while read -r f; do [ -e "$f" ] && echo "$f"; done)
+  [ -z "$LEFT" ] && { PASS=$((PASS+1)); echo "ok   - no partial file is left behind"; } || { FAIL=$((FAIL+1)); echo "FAIL - partial file left: $LEFT"; }
+  kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
+fi
+ab policy reset >/dev/null
 
 # --- uploads -----------------------------------------------------------------
 UP="${TMPDIR:-/tmp}/ab-up-$$"; mkdir -p "$UP"; printf 'alpha' > "$UP/a.txt"; printf 'beta!' > "$UP/b.txt"

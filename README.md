@@ -115,6 +115,7 @@ agent-browser policy check http://192.168.0.7/ --from public                    
 
 - **Hosts:** with an allowlist set, other hosts are refused (`open` fails with `NAVIGATION_BLOCKED`; a link or redirect is cancelled and reported as a `navigation-blocked` event). A deny entry always wins.
 - **Private addresses (default `block`):** a page on the public internet cannot send the browser to `localhost`, a private or link-local address (`10.x`, `192.168.x`, `169.254.169.254`, `*.local`), including names that resolve to one. Addresses you type with `open` may be private, and so may links from a page you are already viewing on one. `--private allow` turns this off.
+- **Downloads:** `--max-downloads N` (default 20 per session) and `--max-download-mb N` (default 200). A download announced as too big is refused, and one that does not announce its size is cut off when it reaches the cap, with no partial file kept. Saved files get the macOS quarantine flag (`quarantined` in `downloads`), so Gatekeeper checks them before they are opened.
 - **Popups:** `--max-tabs N` (default 8) caps open tabs; extra popups are dropped (`popup-blocked`) and `tab new` fails with `TAB_LIMIT`.
 
 ## DevTools protocol (thin)
@@ -139,7 +140,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 252 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 260 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

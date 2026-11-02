@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import CryptoKit
 import UniformTypeIdentifiers
 import Vision
@@ -38,11 +39,14 @@ final class DownloadInfo {
     var state = "downloading"  // downloading | done | failed
     var bytes = 0
     var error: String?
+    var quarantined = false
+    var blockedByPolicy = false
     init(id: Int, url: String) { self.id = id; self.url = url }
 
     var dict: [String: Any] {
         var d: [String: Any] = ["id": id, "url": url, "name": name, "path": path, "state": state, "bytes": bytes]
         if let error { d["error"] = error }
+        if state == "done" { d["quarantined"] = quarantined }
         return d
     }
 }
@@ -430,12 +434,26 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         downloads.append(info)
         downloadByObject[ObjectIdentifier(download)] = info
         download.delegate = self
+        if downloads.count > policy.maxDownloads {
+            stopDownload(download, info, "policy max_downloads (\(policy.maxDownloads)) per session reached")
+            return
+        }
         log("download-started", ["url": info.url], tab: tab)
     }
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
                   completionHandler: @escaping (URL?) -> Void) {
         guard let info = downloadByObject[ObjectIdentifier(download)] else { return completionHandler(nil) }
+        if info.blockedByPolicy { return completionHandler(nil) }  // cancelled in adopt(); WebKit may still ask where to save
+        let capMB = policy.maxDownloadMB, cap = Int64(capMB) * 1_048_576
+        if response.expectedContentLength > cap {
+            info.blockedByPolicy = true
+            info.state = "failed"
+            info.error = "download blocked: \(response.expectedContentLength / 1_048_576) MB is over policy max_download_mb (\(capMB))"
+            log("download-blocked", ["url": info.url, "reason": info.error ?? ""])
+            completionHandler(nil)
+            return
+        }
         var name = (suggestedFilename as NSString).lastPathComponent
         if name.isEmpty || name == "." || name == ".." { name = "download" }
         let dir = Browser.downloadDir
@@ -450,17 +468,50 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         info.name = dest.lastPathComponent
         info.path = dest.path
         completionHandler(dest)
+        // A server may not announce the size: watch what arrives and stop at the cap.
+        Task { @MainActor in
+            while info.state == "downloading" {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if download.progress.completedUnitCount > cap {
+                    self.stopDownload(download, info, "over policy max_download_mb (\(capMB) MB)")
+                    break
+                }
+            }
+        }
+    }
+
+    /// Cancels a download for a policy reason and keeps no partial file.
+    private func stopDownload(_ download: WKDownload, _ info: DownloadInfo, _ reason: String) {
+        info.blockedByPolicy = true
+        info.state = "failed"
+        info.error = "download blocked: \(reason)"
+        log("download-blocked", ["url": info.url, "reason": reason])
+        download.cancel { _ in }
+        if !info.path.isEmpty { try? FileManager.default.removeItem(atPath: info.path) }
     }
 
     func downloadDidFinish(_ download: WKDownload) {
         guard let info = downloadByObject[ObjectIdentifier(download)] else { return }
         info.state = "done"
         info.bytes = ((try? FileManager.default.attributesOfItem(atPath: info.path)[.size]) as? NSNumber)?.intValue ?? 0
+        info.quarantined = markQuarantined(info.path, from: info.url)
         log("download-finished", ["name": info.name, "path": info.path, "bytes": info.bytes])
+    }
+
+    /// Makes sure a downloaded file carries the macOS quarantine flag, so Gatekeeper checks it before it is opened.
+    private func markQuarantined(_ path: String, from url: String) -> Bool {
+        var u = URL(fileURLWithPath: path)
+        if (try? u.resourceValues(forKeys: [.quarantinePropertiesKey]))?.quarantineProperties != nil { return true }
+        var v = URLResourceValues()
+        v.quarantineProperties = [kLSQuarantineTypeKey as String: kLSQuarantineTypeWebDownload,
+                                  kLSQuarantineAgentNameKey as String: "agent-browser",
+                                  kLSQuarantineDataURLKey as String: url]
+        do { try u.setResourceValues(v); return true } catch { return false }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let info = downloadByObject[ObjectIdentifier(download)] else { return }
+        if info.blockedByPolicy { return }  // already reported with the policy reason
         info.state = "failed"
         info.error = error.localizedDescription
         log("download-failed", ["url": info.url, "error": error.localizedDescription])
@@ -887,6 +938,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         if downloadSeq != dlBefore {  // the URL was a file download rather than a page
             await waitForDownloads(timeout: 120)
             let d = downloads.last
+            if let d, d.state != "done" { throw CmdError(code: "DOWNLOAD_FAILED", message: d.error ?? "download failed", retrySafe: false) }
             return ["url": raw, "download": d?.dict ?? [:], "outcome": d.map { "download: \($0.name) (\($0.bytes) bytes)" } ?? "download"]
         }
         var out: [String: Any] = ["url": webView.url?.absoluteString ?? raw, "tab": current.id]
