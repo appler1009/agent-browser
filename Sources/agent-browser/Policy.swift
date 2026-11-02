@@ -134,15 +134,17 @@ func hostIsPrivate(_ host: String) async -> Bool {
     let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
     if h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") { return true }
     if let c = cachedHostIsPrivate(h) { return c }
-    let result: Bool = await Task.detached {
+    // nil = the lookup failed; that is not remembered, so the next navigation looks again.
+    let result: Bool? = await Task.detached { () -> Bool? in
         var hints = addrinfo(); hints.ai_socktype = SOCK_STREAM
         var res: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(h, nil, &hints, &res) == 0, let first = res else { return false }
+        guard getaddrinfo(h, nil, &hints, &res) == 0, let first = res else { return nil }
         defer { freeaddrinfo(res) }
         var p: UnsafeMutablePointer<addrinfo>? = first
         while let cur = p { if privateAddress(UnsafePointer(cur)) { return true }; p = cur.pointee.ai_next }
         return false
     }.value
+    guard let result else { return false }
     storeHostPrivate(h, result)
     return result
 }
