@@ -700,8 +700,13 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         var list: [[String: Any]] = []
         var migrated = false
         if let blob = FileManager.default.contents(atPath: file) {
-            do { list += ((try JSONSerialization.jsonObject(with: try CookieVault.open(blob))) as? [[String: Any]]) ?? [] }
-            catch { cookieSaveError = "saved cookies could not be decrypted (\(error))"; undecryptable = true }
+            do {
+                let loaded = ((try JSONSerialization.jsonObject(with: try CookieVault.open(blob))) as? [[String: Any]]) ?? []
+                list += loaded
+                // What is on disk right now, so status and the menu are right before the first save of this run.
+                let at = (try? FileManager.default.attributesOfItem(atPath: file)[.modificationDate]) as? Date ?? Date()
+                cookiesSaved = (loaded.count, at)
+            } catch { cookieSaveError = "saved cookies could not be decrypted (\(error))"; undecryptable = true }
         }
         // An earlier version wrote plain JSON; load it (also if an encrypted file exists) and remove it once re-saved.
         if let old = legacyCookieFile, let data = FileManager.default.contents(atPath: old),
