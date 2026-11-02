@@ -10,12 +10,14 @@ struct MenuEntry {
     var children: [MenuEntry]? = nil
     var separator = false
     var checked = false
+    var icon: String? = nil            // favicon URL of the page; the menu bar item loads it
 
     var json: [String: Any] {
         var d: [String: Any] = ["title": title]
         if let action { d["action"] = action }
         if separator { d["separator"] = true }
         if checked { d["checked"] = true }
+        if let icon { d["icon"] = icon }
         if let children { d["children"] = children.map(\.json) }
         return d
     }
@@ -70,8 +72,10 @@ func menuModel(sessions: [[String: Any]], stale: Int, auditExists: Bool, loginIt
         }
         sub.append(.sep)
         sub.append(MenuEntry(title: "Close session", action: "close \(name)"))
-        m.append(MenuEntry(title: "\(menubarHeaderGlyph(s))  \(name)" + (host.isEmpty ? "" : " — \(host)") + (attention ? "  (needs you)" : ""),
-                           children: sub))
+        // The favicon (or a globe) stands in front of the row, so the state glyph is only shown when something is going on.
+        let glyph = menubarHeaderGlyph(s)
+        m.append(MenuEntry(title: (glyph == "○" ? "" : "\(glyph)  ") + name + (host.isEmpty ? "" : " — \(host)") + (attention ? "  (needs you)" : ""),
+                           children: sub, icon: s["favicon"] as? String ?? ""))
     }
     if stale > 0 { m.append(MenuEntry(title: "\(stale) stale session file(s)")) }
     m.append(.sep)
@@ -154,9 +158,36 @@ final class MenubarApp: NSObject, NSMenuDelegate {
         apply(r.sessions, r.stale)
     }
 
+    // Favicons: fetched here, once per URL, with no cookies and no disk cache. Only https (or loopback http),
+    // at most 256 KB, 5 s. The page chooses the URL, so this is the one request the menu bar item makes for a page.
+    private var favicons: [String: NSImage] = [:]
+    private var faviconTried: Set<String> = []
+    private static let faviconSession: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 5; c.timeoutIntervalForResource = 8
+        c.httpCookieStorage = nil; c.urlCredentialStorage = nil; c.urlCache = nil
+        return URLSession(configuration: c)
+    }()
+
+    private func loadFavicons() {
+        for s in sessions {
+            guard let f = s["favicon"] as? String, !faviconTried.contains(f), let u = URL(string: f),
+                  u.scheme == "https" || (u.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(u.host ?? "")) else { continue }
+            faviconTried.insert(f)
+            if faviconTried.count > 200 { faviconTried.removeAll(); favicons.removeAll() }
+            Self.faviconSession.dataTask(with: u) { data, resp, _ in
+                guard let data, data.count <= 262_144, (resp as? HTTPURLResponse)?.statusCode == 200,
+                      let img = NSImage(data: data), img.size.width > 0 else { return }
+                img.size = NSSize(width: 16, height: 16)
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.favicons[f] = img } }
+            }.resume()
+        }
+    }
+
     private func apply(_ s: [[String: Any]], _ staleCount: Int) {
         sessions = s
         stale = staleCount
+        loadFavicons()
         updateIcon()
         notifyNewlyWaiting()
     }
@@ -250,6 +281,10 @@ final class MenubarApp: NSObject, NSMenuDelegate {
         mi.representedObject = e.action
         mi.isEnabled = e.action != nil || e.children != nil
         mi.state = e.checked ? .on : .off
+        if let ic = e.icon {  // session rows: the site's favicon once loaded, a globe until then
+            mi.image = favicons[ic]
+                ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        }
         if let kids = e.children {
             let sub = NSMenu(title: e.title)
             sub.autoenablesItems = false

@@ -777,6 +777,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
             "recent_steps": watch.recentSteps.suffix(8).map { $0 },
         ]
+        if let f = try? await js("""
+            const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
+            const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
+            try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
+            """) as? String { s["favicon"] = f }
         if let r = runningLabel { s["command"] = r }
         if let a = approvalFor { s["approval_for"] = a }
         return s

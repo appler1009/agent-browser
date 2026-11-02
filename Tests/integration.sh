@@ -285,6 +285,18 @@ wait $CLICKPID
 ab watch off >/dev/null
 R=$(ab menubar --dump-menu);                      check "menu model: idle session offers show window and take over" '[.result.menu[]|select(.title|test("'"$AGENT_BROWSER_SESSION"'"))|.children[].title]|(index("Show window")!=null and index("Take over (pause the agent)")!=null)' "$R"
 check "menu model: static items" '[.result.menu[].title]|(index("Open downloads folder")!=null and index("Start at login")!=null and index("Quit menu bar item")!=null)' "$R"
+R=$(ab menubar --dump-menu);                      check "menu model: an idle session row has no state glyph, only its name" '[.result.menu[]|select(.title|test("'"$AGENT_BROWSER_SESSION"'"))|.title|test("^[○●▲]")]|all(.==false)' "$R"
+R=$(ab menubar --dump-menu);                      check "menu model: session rows carry an icon field for the favicon" '[.result.menu[]|select(.title|test("'"$AGENT_BROWSER_SESSION"'"))|has("icon")]|all' "$R"
+# favicon URL in status (the menu bar item loads it); needs python3 for a throwaway local server
+if command -v python3 >/dev/null; then
+  FP=$((20000 + RANDOM % 20000)); python3 -m http.server $FP --bind 127.0.0.1 --directory "$FIX" >/dev/null 2>&1 & FPID=$!
+  sleep 1
+  ab open "http://127.0.0.1:$FP/login.html" >/dev/null
+  R=$(ab status); check "status reports the page's favicon url (default /favicon.ico)" '.result.favicon=="http://127.0.0.1:'$FP'/favicon.ico"' "$R"
+  ab open "file://$FIX/login.html" >/dev/null
+  R=$(ab status); check "status has no favicon for a file page" '.result|has("favicon")|not' "$R"
+  kill $FPID 2>/dev/null; wait $FPID 2>/dev/null
+fi
 LA="$(mktemp -d)"
 R=$(AGENT_BROWSER_LAUNCH_AGENTS_DIR="$LA" ab menubar install);   check "menubar install writes a launch agent" '.ok' "$R"
 [ "$(plutil -extract ProgramArguments json -o - "$LA/dev.appler.agent-browser.menubar.plist" | jq -r '.[1],.[2]' | tr '\n' ' ')" = "menubar --foreground " ] && [ "$(plutil -extract RunAtLoad raw -o - "$LA/dev.appler.agent-browser.menubar.plist")" = "true" ] && { PASS=$((PASS+1)); echo "ok   - launch agent runs 'menubar --foreground' at load"; } || { FAIL=$((FAIL+1)); echo "FAIL - launch agent contents"; }
