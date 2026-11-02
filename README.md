@@ -52,7 +52,7 @@ The first command starts a background helper that owns the page (`close` stops i
 | `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
 | `status`, `cdp`, `mcp`, `close` | |
 
-`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Besides WebKit's own store, the helper keeps the profile's persistent cookies in `~/.agent-browser/profiles/NAME/cookies.json` (owner-only), because WebKit on some macOS versions doesn't write its store before the helper exits. Exported cookie files are written `0600`.
+`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). The helper also saves **all** of the profile's cookies, session cookies without an expiry included, to `~/.agent-browser/profiles/NAME/cookies.enc` and restores them at startup, because WebKit drops session cookies on exit and, on some macOS versions, doesn't write its store before exiting. That file is encrypted (AES-256-GCM) with a random key kept in your login keychain, and is owner-only; if the key is unavailable the cookies are not saved (never written as plain text), and a file that can't be decrypted is kept as `cookies.enc.unreadable`. WebKit's own data folder for the profile (localStorage and similar) is not encrypted by agent-browser; FileVault covers it. `cookies export` writes the plain JSON you ask for, owner-only. The menu bar item shows each session's profile and when its cookies were last saved.
 
 ## What agents get back
 
@@ -124,7 +124,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 216 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 227 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

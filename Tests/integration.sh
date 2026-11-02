@@ -19,6 +19,7 @@ ref() { # tree, regex -> first ref on a line matching regex
   echo "$1" | grep -E "$2" | head -1 | grep -oE '@s[0-9]+:e[0-9]+' | head -1
 }
 VT="$(mktemp -d)"
+export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real keychain is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
 trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
@@ -176,17 +177,36 @@ pab() { AGENT_BROWSER_SESSION="$PS" "$BIN" --profile "$PN" "$@"; }
 R=$(pab status);                                  check "status shows persistent profile" ".ok and .result.profile==\"$PN\" and .result.persistent==true" "$R"
 R=$("$BIN" --session "$PS" --profile other status); check "different profile on a running session is refused" '.ok==false and .error.code=="PROFILE_MISMATCH"' "$R"
 cat > "$HOME/.ab-itest-cookie.json" <<'JSON'
-[{"name":"keep","value":"me","domain":"example.org","path":"/","expires":4102444800}]
+[{"name":"keep","value":"me","domain":"example.org","path":"/","expires":4102444800},
+ {"name":"sess","value":"s3ssion-value-xyz","domain":"example.org","path":"/","secure":true,"httpOnly":true}]
 JSON
 pab cookies import "$HOME/.ab-itest-cookie.json" >/dev/null; rm -f "$HOME/.ab-itest-cookie.json"
 pab close >/dev/null; sleep 2
 F0=$FAIL
 R=$(pab cookies export);                          check "cookie survives helper restart with the same profile" '.result.cookies|map(select(.name=="keep"))|length==1' "$R"
+check "a session cookie (no expiry) also survives the restart" '.result.cookies|map(select(.name=="sess" and .value=="s3ssion-value-xyz" and (has("expires")|not)))|length==1' "$R"
 if [ "$FAIL" -gt "$F0" ]; then  # help diagnose runner-specific storage behaviour
   echo "       macOS $(sw_vers -productVersion); recently written WebKit/cookie files:"
   find "$HOME/Library" -type f -mmin -3 \( -iname '*cookie*' -o -path '*WebKit*' -o -path '*HTTPStorages*' \) 2>/dev/null | head -20 | sed 's/^/         /'
 fi
-[ "$(stat -f %Lp "$HOME/.agent-browser/profiles/$PN/cookies.json" 2>/dev/null)" = "600" ] && [ "$(stat -f %Lp "$HOME/.agent-browser/profiles/$PN")" = "700" ] && { PASS=$((PASS+1)); echo "ok   - profile cookie file is owner-only"; } || { FAIL=$((FAIL+1)); echo "FAIL - profile cookie file permissions"; }
+PD="$HOME/.agent-browser/profiles/$PN"
+[ "$(stat -f %Lp "$PD/cookies.enc" 2>/dev/null)" = "600" ] && [ "$(stat -f %Lp "$PD")" = "700" ] && { PASS=$((PASS+1)); echo "ok   - profile cookie file is owner-only"; } || { FAIL=$((FAIL+1)); echo "FAIL - profile cookie file permissions"; }
+head -c 6 "$PD/cookies.enc" | grep -q "^ABCK1" && ! grep -q -e "s3ssion-value-xyz" -e "example.org" -e '"keep"' "$PD/cookies.enc" && [ ! -e "$PD/cookies.json" ] \
+  && { PASS=$((PASS+1)); echo "ok   - saved cookies are encrypted (no names, values or domains in the file) and no plain copy exists"; } || { FAIL=$((FAIL+1)); echo "FAIL - cookie file is not encrypted"; }
+R=$(pab status);                                  check "status reports the saved, encrypted cookies" '.result.profile_cookies.encrypted==true and (.result.profile_cookies.count>=2) and (.result.profile_cookies|has("error")|not)' "$R"
+R=$(ab menubar --dump-menu);                      check "menu model: persistent profile line says kept and encrypted" '[.result.menu[]|select(.children!=null)|.children[].title]|(map(test("kept between runs"))|any) and (map(test("encrypted"))|any)' "$R"
+# an earlier version's plain cookies.json is encrypted on first start and then securely removed
+pab close >/dev/null; sleep 3.5
+cat > "$PD/cookies.json" <<'JSON'
+[{"name":"legacy","value":"old-plain","domain":"example.org","path":"/","expires":4102444800}]
+JSON
+R=$(pab cookies export);                          check "legacy plain cookies.json is loaded" '.result.cookies|map(select(.name=="legacy"))|length==1' "$R"
+[ ! -e "$PD/cookies.json" ] && [ -f "$PD/cookies.enc" ] && ! grep -q "old-plain" "$PD/cookies.enc" && { PASS=$((PASS+1)); echo "ok   - legacy plain file migrated to the encrypted file and removed"; } || { FAIL=$((FAIL+1)); echo "FAIL - legacy cookie file migration"; }
+# a wrong key must not fall back to plain text or lose the file silently
+pab close >/dev/null; sleep 3.5
+cp "$VT/cookie.key" "$VT/cookie.key.bak"; head -c 32 /dev/urandom > "$VT/cookie.key"
+R=$(AGENT_BROWSER_SESSION="$PS" "$BIN" --profile "$PN" status);  check "a wrong key is reported, not hidden" '.result.profile_cookies.error|test("could not be decrypted")' "$R"
+AGENT_BROWSER_SESSION="$PS" "$BIN" close >/dev/null; sleep 3.5; cp "$VT/cookie.key.bak" "$VT/cookie.key"
 pab cookies clear >/dev/null; pab close >/dev/null; sleep 1.5
 R=$(pab cookies export);                          check "cleared cookies do not come back after a restart" '.result.count==0' "$R"
 pab close >/dev/null; sleep 1.5

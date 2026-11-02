@@ -594,25 +594,43 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     // MARK: persistent cookies
     //
     // A persistent profile keeps WebKit's own store, but WebKit on some macOS versions (15.x) does not write
-    // cookies to disk before the helper exits. So the helper also keeps the persistent (non-session) cookies
-    // in the profile folder itself and loads them at startup. File and folder are owner-only.
+    // cookies to disk before the helper exits, and it never keeps session cookies across a restart. So the helper
+    // also keeps ALL the profile's cookies (session cookies too, stored without an expiry) in the profile folder
+    // and loads them at startup. The file is encrypted (AES-GCM, key in the login keychain) and owner-only.
+    // WebKit's own copy of a persistent profile (its data folder under ~/Library/WebKit) is not ours to encrypt.
 
     private var cookieRestore: Task<Void, Never>?
     private var cookiePersistTimer: Timer?
+    private var cookiesSaved: (count: Int, at: Date)?
+    private var cookieSaveError: String?
+    private var undecryptable = false
 
-    private var cookieFile: String? {
-        daemonProfile.map { NSHomeDirectory() + "/.agent-browser/profiles/\($0)/cookies.json" }
-    }
+    private var profileDir: String? { daemonProfile.map { NSHomeDirectory() + "/.agent-browser/profiles/\($0)" } }
+    private var cookieFile: String? { profileDir.map { $0 + "/cookies.enc" } }
+    private var legacyCookieFile: String? { profileDir.map { $0 + "/cookies.json" } }
 
     private func restoreCookies() async {
         guard let file = cookieFile else { return }
         let store = configuration.websiteDataStore.httpCookieStore
-        if let data = FileManager.default.contents(atPath: file),
-           let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
-            for d in list {
-                if let e = (d["expires"] as? NSNumber)?.doubleValue, Date(timeIntervalSince1970: e) < Date() { continue }
-                if let c = makeCookie(d) { await store.setCookie(c) }
-            }
+        var list: [[String: Any]] = []
+        var migrated = false
+        if let blob = FileManager.default.contents(atPath: file) {
+            do { list += ((try JSONSerialization.jsonObject(with: try CookieVault.open(blob))) as? [[String: Any]]) ?? [] }
+            catch { cookieSaveError = "saved cookies could not be decrypted (\(error))"; undecryptable = true }
+        }
+        // An earlier version wrote plain JSON; load it (also if an encrypted file exists) and remove it once re-saved.
+        if let old = legacyCookieFile, let data = FileManager.default.contents(atPath: old),
+           let l = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+            list += l
+            migrated = true
+        }
+        for d in list {
+            if let e = (d["expires"] as? NSNumber)?.doubleValue, Date(timeIntervalSince1970: e) < Date() { continue }
+            if let c = makeCookie(d) { await store.setCookie(c) }
+        }
+        if migrated {
+            await persistCookies()
+            if cookieSaveError == nil, let old = legacyCookieFile { Self.wipe(old) }  // only once the encrypted copy exists
         }
         // Save changes made while browsing, in case the helper is killed instead of closed.
         cookiePersistTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -620,18 +638,40 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
     }
 
+    private static func wipe(_ path: String) {
+        if let h = FileHandle(forWritingAtPath: path) {
+            let n = (try? h.seekToEnd()) ?? 0
+            try? h.seek(toOffset: 0)
+            try? h.write(contentsOf: Data(count: Int(n)))
+            try? h.synchronize()
+            try? h.close()
+        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     func persistCookies() async {
         guard let file = cookieFile else { return }
         let now = Date()
         let keep = await configuration.websiteDataStore.httpCookieStore.allCookies()
-            .filter { ($0.expiresDate ?? .distantPast) > now }
+            .filter { ($0.expiresDate ?? .distantFuture) > now }   // session cookies have no expiry: keep them
             .map(cookieDict)
             .sorted { ($0["domain"] as? String ?? "") < ($1["domain"] as? String ?? "") }
         let dir = (file as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        if let data = try? JSONSerialization.data(withJSONObject: keep, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
-            try? data.write(to: URL(fileURLWithPath: file), options: .atomic)
+        if undecryptable {  // keep the file we cannot read (the key may come back) instead of overwriting it
+            try? FileManager.default.removeItem(atPath: file + ".unreadable")
+            try? FileManager.default.moveItem(atPath: file, toPath: file + ".unreadable")
+            undecryptable = false
+        }
+        do {
+            let json = try JSONSerialization.data(withJSONObject: keep, options: [.sortedKeys, .withoutEscapingSlashes])
+            try CookieVault.seal(json).write(to: URL(fileURLWithPath: file), options: .atomic)
             chmod(file, 0o600)
+            cookiesSaved = (keep.count, now)
+            cookieSaveError = nil
+        } catch {
+            // Never fall back to plain text: if the key is unavailable the cookies are simply not saved.
+            cookieSaveError = "cookies not saved: \(error)"
         }
     }
 
@@ -782,6 +822,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));
             try { return new URL(l ? l.getAttribute('href') : '/favicon.ico', document.baseURI).href; } catch (e) { return null; }
             """) as? String { s["favicon"] = f }
+        if daemonProfile != nil {
+            var pc: [String: Any] = ["encrypted": true]
+            if let c = cookiesSaved { pc["count"] = c.count; pc["saved_at"] = Int(c.at.timeIntervalSince1970) }
+            if let e = cookieSaveError { pc["error"] = e }
+            s["profile_cookies"] = pc
+        }
         if let r = runningLabel { s["command"] = r }
         if let a = approvalFor { s["approval_for"] = a }
         return s

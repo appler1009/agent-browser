@@ -59,8 +59,21 @@ func menuModel(sessions: [[String: Any]], stale: Int, auditExists: Bool, loginIt
         if !title.isEmpty { sub.append(MenuEntry(title: clip(title, 60))) }
         if let u = s["url"] as? String, !u.isEmpty { sub.append(MenuEntry(title: clip(u, 70))) }
         sub.append(MenuEntry(title: "State: " + stateText(s)))
-        let prof = (s["profile"] as? String).map { "profile \($0)" } ?? "temporary profile"
-        sub.append(MenuEntry(title: "\(s["tabs"] as? Int ?? 1) tab(s) · \(prof)"))
+        sub.append(MenuEntry(title: "\(s["tabs"] as? Int ?? 1) tab(s)"))
+        if let p = s["profile"] as? String {
+            sub.append(MenuEntry(title: "Profile \"\(p)\": kept between runs"))
+            let pc = s["profile_cookies"] as? [String: Any] ?? [:]
+            if let e = pc["error"] as? String {
+                sub.append(MenuEntry(title: "⚠ " + clip(e, 70)))
+            } else if let n = pc["count"] as? Int, let at = pc["saved_at"] as? Int {
+                let f = DateFormatter(); f.dateFormat = "HH:mm"
+                sub.append(MenuEntry(title: "\(n) cookie(s) saved, encrypted · \(f.string(from: Date(timeIntervalSince1970: TimeInterval(at))))"))
+            } else {
+                sub.append(MenuEntry(title: "Cookies: saved, encrypted, on close"))
+            }
+        } else {
+            sub.append(MenuEntry(title: "Temporary profile: nothing is kept after close"))
+        }
         sub.append(.sep)
         let watching = s["watching"] as? Bool == true, paused = s["paused"] as? Bool == true
         sub.append(MenuEntry(title: watching ? "Hide window" : "Show window", action: "watch \(watching ? "off" : "on") \(name)"))
