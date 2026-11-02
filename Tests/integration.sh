@@ -9,6 +9,8 @@ export AGENT_BROWSER_SESSION="itest-$$"
 PASS=0; FAIL=0
 
 ab() { "$BIN" "$@"; }
+# macOS runners have no coreutils `timeout`.
+command -v timeout >/dev/null 2>&1 || timeout() { local s=$1; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 check() { # name, jq-filter, json
   if echo "$3" | jq -e "$2" >/dev/null 2>&1; then PASS=$((PASS+1)); echo "ok   - $1"
   else FAIL=$((FAIL+1)); echo "FAIL - $1"; echo "       $3" | cut -c1-600; fi
