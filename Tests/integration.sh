@@ -20,6 +20,7 @@ ref() { # tree, regex -> first ref on a line matching regex
 }
 VT="$(mktemp -d)"
 export AGENT_BROWSER_COOKIE_KEY_FILE="$VT/cookie.key"   # test key; the real keychain is never touched
+export AGENT_BROWSER_POLICY_FILE="$VT/policy.json"   # test policy; ~/.agent-browser/policy.json is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
 trap 'for x in "" -vault -vok -vno -vcdp; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
@@ -338,6 +339,45 @@ R=$(ab status);                                       check "a pending human che
 R=$(ab open "file://$FIX/captcha-badge.html");        check "invisible reCAPTCHA badge and hidden elements are not flagged" '.ok and (.result|has("needs_human")|not)' "$R"
 R=$(ab status);                                       check "needs_you clears once the page is fine" '.result.needs_you==false' "$R"
 R=$(ab open "file://$FIX/login.html");                check "an ordinary page has no needs_human" '.ok and (.result|has("needs_human")|not)' "$R"
+
+# --- policy: what the browser may do on its own --------------------------
+R=$(ab policy);                                   check "policy defaults: private addresses blocked, 8 tabs, dialogs ask" '.result.exists==false and .result.policy.private_networks=="block" and .result.policy.max_tabs==8 and .result.policy.dialogs=="ask"' "$R"
+R=$(ab policy check http://10.1.2.3/ --from public);        check "public page -> 10.x is blocked" '.ok and .result.allowed==false and (.result.reason|test("private address"))' "$R"
+R=$(ab policy check http://192.168.0.7/ --from public);      check "public page -> 192.168.x is blocked" '.result.allowed==false' "$R"
+R=$(ab policy check http://127.0.0.1:8080/ --from public);   check "public page -> loopback is blocked" '.result.allowed==false' "$R"
+R=$(ab policy check http://localhost/ --from public);        check "public page -> localhost is blocked" '.result.allowed==false' "$R"
+R=$(ab policy check "http://[::1]/" --from public);          check "public page -> IPv6 loopback is blocked" '.result.allowed==false' "$R"
+R=$(ab policy check http://169.254.169.254/ --from public);  check "public page -> link-local (cloud metadata) is blocked" '.result.allowed==false' "$R"
+R=$(ab policy check http://93.184.216.34/ --from public);    check "public page -> public address is allowed" '.result.allowed==true' "$R"
+R=$(ab policy check http://127.0.0.1:8080/ --from private);  check "a local page may lead to a private address" '.result.allowed==true' "$R"
+R=$(ab policy check http://127.0.0.1:8080/ --from typed);    check "an address you type may be private" '.result.allowed==true' "$R"
+R=$(ab policy set --allow-host example.com --allow-host '*.example.org' --deny-host bad.example.org --max-tabs 3 --max-downloads 2 --max-download-mb 1); check "policy set writes the file" '.ok and (.result.policy.allow_hosts|length==2) and .result.policy.max_tabs==3' "$R"
+[ "$(stat -f %Lp "$VT/policy.json")" = "600" ] && { PASS=$((PASS+1)); echo "ok   - policy file is owner-only"; } || { FAIL=$((FAIL+1)); echo "FAIL - policy file permissions"; }
+R=$(ab policy check https://example.com/ --from typed);      check "allowed host passes" '.result.allowed==true' "$R"
+R=$(ab policy check https://a.example.org/ --from typed);    check "wildcard matches a subdomain" '.result.allowed==true' "$R"
+R=$(ab policy check https://example.org/ --from typed);      check "wildcard does not match the bare domain" '.result.allowed==false and (.result.reason|test("not in the policy"))' "$R"
+R=$(ab policy check https://bad.example.org/ --from typed);  check "deny wins over allow" '.result.allowed==false and (.result.reason|test("denied"))' "$R"
+R=$(ab policy check https://other.net/ --from typed);        check "host outside the allowlist is blocked" '.result.allowed==false' "$R"
+R=$(ab policy set --max-tabs 0);                  check "policy set rejects a bad number" '.ok==false and .error.code=="USAGE"' "$R"
+R=$(ab policy set --allow-host 'http://x.com/');  check "policy set rejects a URL as a host" '.ok==false and .error.code=="USAGE"' "$R"
+R=$(env -u AGENT_BROWSER_POLICY_FILE "$BIN" policy set --max-tabs 99 </dev/null); check "policy set needs a terminal (an agent cannot loosen limits)" '.ok==false and .error.code=="POLICY_NEEDS_TTY"' "$R"
+R=$(ab open https://other.net/);                  check "open of a host outside the allowlist fails with NAVIGATION_BLOCKED" '.ok==false and .error.code=="NAVIGATION_BLOCKED"' "$R"
+ab policy set --no-allow-hosts --deny-host localhost >/dev/null
+# a page on 127.0.0.1 linking to a denied host: the click is cancelled, with an event
+if command -v python3 >/dev/null; then
+  WWW="$VT/www"; mkdir -p "$WWW"; WP=$((40000 + RANDOM % 20000))
+  printf '<!doctype html><title>Nav</title><a href="http://localhost:%s/b.html">to localhost</a> <a href="http://127.0.0.1:%s/b.html">to same</a>' "$WP" "$WP" > "$WWW/a.html"
+  echo '<!doctype html><title>B</title><p>arrived</p>' > "$WWW/b.html"
+  python3 -m http.server $WP --bind 127.0.0.1 --directory "$WWW" >/dev/null 2>&1 & WPID=$!
+  sleep 1
+  R=$(ab open "http://127.0.0.1:$WP/a.html");     check "open of a private address you typed is allowed" '.ok and .result.title=="Nav"' "$R"
+  T=$(ab snapshot | jq -r .result.tree); L1=$(ref "$T" 'to localhost'); L2=$(ref "$T" 'to same')
+  R=$(ab click "$L1");                            check "link to a denied host is cancelled and reported" '.ok and ([.events[]|select(.type=="navigation-blocked")]|length==1) and (.result.url|test("a.html"))' "$R"
+  R=$(ab open "http://localhost:$WP/b.html");     check "open of a denied host fails" '.ok==false and .error.code=="NAVIGATION_BLOCKED"' "$R"
+  R=$(ab click "$L2");                            check "link to an allowed host still works" '.ok and (.result.url|test("b.html"))' "$R"
+  kill $WPID 2>/dev/null; wait $WPID 2>/dev/null
+fi
+ab policy reset >/dev/null
 
 # --- vault: credentials for bots -----------------------------------------
 PW='Zq9-vault-pw-1'; PW2='other-pw-4567'; TSECRET='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'

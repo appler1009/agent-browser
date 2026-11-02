@@ -50,6 +50,7 @@ The first command starts a background helper that owns the page (`close` stops i
 | `vault list` / `audit` (`add`, `rm`, `export` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
 | `sessions` | every running session with its state; never starts one |
 | `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
+| `policy [show]` / `check` (`set`, `reset` are for you) | limits on hosts, private addresses, tabs, downloads and dialogs, see [Policy](#policy-limits-you-set) |
 | `status`, `cdp`, `mcp`, `close` | |
 
 `--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). The helper also saves **all** of the profile's cookies, session cookies without an expiry included, to `~/.agent-browser/profiles/NAME/cookies.enc` and restores them at startup, because WebKit drops session cookies on exit and, on some macOS versions, doesn't write its store before exiting. That file is encrypted (AES-256-GCM) with a random key kept in your login keychain, and is owner-only; if the key is unavailable the cookies are not saved (never written as plain text), and a file that can't be decrypted is kept as `cookies.enc.unreadable`. WebKit's own data folder for the profile (localStorage and similar) is not encrypted by agent-browser; FileVault covers it. `cookies export` writes the plain JSON you ask for, owner-only. The menu bar item shows each session's profile and when its cookies were last saved.
@@ -102,6 +103,20 @@ agent-browser fill @s1:e4 --secret github --field password
 
 The vault protects the password and the TOTP seed. A setup page shows its key before enrollment, so an agent that screenshots it first can still see the QR code; recovery codes are visible to an agent that reads that page before `recovery save` (afterwards they are redacted from output). It does not hide the signed-in session itself (`cookies export` still returns session cookies), a visible one-time code can show up in a screenshot, and a compromised site you allowed can read what you type into it.
 
+## Policy (limits you set)
+
+`agent-browser policy` shows the limits; `policy set ...` changes them. Changing them needs an interactive terminal, so a page or an agent talking to the browser cannot loosen them (it is stored in `~/.agent-browser/policy.json`, owner-only, and running sessions pick up changes). It is not a defence against an agent that can run shell commands as you, and it filters navigations, frames, popups, downloads and dialogs, not every image or script request (use `block url` for those).
+
+```sh
+agent-browser policy set --allow-host example.com --allow-host '*.example.org'   # only these hosts (wildcard = subdomains)
+agent-browser policy set --deny-host ads.example.net --private block --max-tabs 5
+agent-browser policy check http://192.168.0.7/ --from public                      # what would happen? (read-only)
+```
+
+- **Hosts:** with an allowlist set, other hosts are refused (`open` fails with `NAVIGATION_BLOCKED`; a link or redirect is cancelled and reported as a `navigation-blocked` event). A deny entry always wins.
+- **Private addresses (default `block`):** a page on the public internet cannot send the browser to `localhost`, a private or link-local address (`10.x`, `192.168.x`, `169.254.169.254`, `*.local`), including names that resolve to one. Addresses you type with `open` may be private, and so may links from a page you are already viewing on one. `--private allow` turns this off.
+- **Popups:** `--max-tabs N` (default 8) caps open tabs; extra popups are dropped (`popup-blocked`) and `tab new` fails with `TAB_LIMIT`.
+
 ## DevTools protocol (thin)
 
 `agent-browser cdp start [--port N]` serves a localhost-only endpoint (`/json/version`, `/json/list`, WebSocket at `/devtools/browser|page/<id>`) that Puppeteer and Playwright can attach to:
@@ -124,7 +139,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 227 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 252 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

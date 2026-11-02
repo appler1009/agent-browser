@@ -62,6 +62,9 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     var lastFailure: String?
     var lastMime = ""
     var navInFlight = false
+    /// May the next navigation go to a private address? True while the browser is on a local or private page
+    /// (or the person typed a private address); false on the public internet.
+    var chainPrivateOK = true
     var navCount = 0
     var lastStatus: Int?
     private var dlSeqAtStart = 0
@@ -81,14 +84,22 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if navigationAction.shouldPerformDownload {
-            decisionHandler(.download)
-            return
+        let isMain = navigationAction.targetFrame?.isMainFrame ?? true
+        let url = navigationAction.request.url
+        let download = navigationAction.shouldPerformDownload
+        let policy = browser.policy
+        let privateOK = chainPrivateOK
+        Task { @MainActor in
+            if let url, let why = await navigationBlockReason(url, policy: policy, chainPrivateOK: privateOK, explicit: false) {
+                browser.log("navigation-blocked", ["url": url.absoluteString, "reason": why, "main_frame": isMain], tab: self)
+                if isMain && navInFlight { finishNavigation(.failed("navigation blocked: \(why)")) }
+                decisionHandler(.cancel)
+                return
+            }
+            if download { decisionHandler(.download); return }
+            if isMain, let u = url { browser.log("navigation", ["url": u.absoluteString], tab: self) }
+            decisionHandler(.allow)
         }
-        if navigationAction.targetFrame?.isMainFrame ?? true, let u = navigationAction.request.url {
-            browser.log("navigation", ["url": u.absoluteString], tab: self)
-        }
-        decisionHandler(.allow)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
@@ -117,6 +128,11 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         committedCount += 1
+        if let u = webView.url, let scheme = u.scheme?.lowercased(), scheme == "http" || scheme == "https", let h = u.host {
+            chainPrivateOK = cachedHostIsPrivate(h) ?? false
+        } else {
+            chainPrivateOK = true
+        }
         browser.notify("commit", ["url": webView.url?.absoluteString ?? ""], tab: self)
     }
 
@@ -192,7 +208,13 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if browser.tabCount >= browser.policy.maxTabs {
+            browser.log("popup-blocked", ["url": navigationAction.request.url?.absoluteString ?? "",
+                                          "reason": "policy max_tabs (\(browser.policy.maxTabs)) reached"], tab: self)
+            return nil
+        }
         let tab = browser.openTab(configuration: configuration)
+        tab.chainPrivateOK = chainPrivateOK
         browser.log("tab-opened", ["new_tab": tab.id, "url": navigationAction.request.url?.absoluteString ?? ""], tab: self)
         return tab.webView
     }
@@ -234,6 +256,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private(set) var watch: WatchWindow!
     private let configuration: WKWebViewConfiguration
     private(set) var tabs: [Tab] = []
+    private let policyCache = PolicyCache()
+    var policy: Policy { policyCache.current }
+    var tabCount: Int { tabs.count }
     private(set) var current: Tab!
     private var nextTabId = 1
     private var snapCounter = 0
@@ -841,6 +866,10 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
         guard let url = URL(string: raw) else { throw CmdError(code: "BAD_URL", message: "not a valid URL: \(raw)") }
         let timeout = (args["timeout"] as? Double) ?? 30
+        if let why = await navigationBlockReason(url, policy: policy, chainPrivateOK: true, explicit: true) {
+            throw CmdError(code: "NAVIGATION_BLOCKED", message: "not opened: \(why)")
+        }
+        current.chainPrivateOK = await urlIsLocalOrPrivate(url)  // an address you type may be private; where it leads may not
         let dlBefore = downloadSeq
         current.lastStatus = nil
         current.navInFlight = true
@@ -851,7 +880,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         }
         switch await waitForNavigation(timeout: timeout) {
         case .finished: break
-        case .failed(let m): throw CmdError(code: "NAVIGATION_FAILED", message: m)
+        case .failed(let m): throw CmdError(code: m.hasPrefix("navigation blocked") ? "NAVIGATION_BLOCKED" : "NAVIGATION_FAILED", message: m)
         case .timeout:
             throw CmdError(code: "TIMEOUT", message: "page did not finish loading within \(Int(timeout))s")
         }
@@ -1254,6 +1283,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private func tabCommand(_ args: [String: Any]) async throws -> [String: Any] {
         switch args["action"] as? String ?? "" {
         case "new":
+            if tabs.count >= policy.maxTabs {
+                throw CmdError(code: "TAB_LIMIT", message: "policy max_tabs (\(policy.maxTabs)) reached; close a tab first")
+            }
             let t = openTab()
             if let u = args["url"] as? String, !u.isEmpty {
                 var a: [String: Any] = ["url": u]

@@ -27,6 +27,7 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   viewport [W H]                   page size in CSS pixels (default 1280 800)
   useragent <string...>|reset      user agent for pages loaded from now on
   block images|media|fonts|scripts|styles | url <regex> | clear | status   content blocking for new requests
+  policy [show] | set ... | reset  limits you set from a terminal: allowed/denied hosts, private addresses, tabs, downloads, dialogs
   status                           session, profile, tabs
   cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
@@ -246,6 +247,9 @@ if cmd == "sessions" {
 }
 if cmd == "menubar" {
     runMenubarCLI(Array(argv.dropFirst()))
+}
+if cmd == "policy" {
+    runPolicyCLI(Array(argv.dropFirst()))
 }
 if cmd == "vault" {
     runVaultCLI(Array(argv.dropFirst()))
