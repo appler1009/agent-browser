@@ -982,9 +982,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "pause": watch.setPaused(true)
         case "resume": watch.setPaused(false)
         case "status": break
-        default: throw CmdError(code: "USAGE", message: "watch takes on|off|pause|resume|status")
+        case "log-right": watch.setLogOnRight(true)
+        case "log-below": watch.setLogOnRight(false)
+        default: throw CmdError(code: "USAGE", message: "watch takes on|off|pause|resume|status|log-right|log-below")
         }
-        return ["watching": watch.visible, "paused": watch.paused]
+        return ["watching": watch.visible, "paused": watch.paused, "log": watch.logInfo]
     }
 
     // What the menu bar item shows. Updated by execute() and unlock().

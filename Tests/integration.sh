@@ -26,7 +26,7 @@ export AGENT_BROWSER_IDLE_SUSPEND_SECS=3   # idle sessions stop media after 3 s 
 export AGENT_BROWSER_NOTES_DIR="$VT/notes"   # test notes; ~/.agent-browser/notes is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes -idle -leak; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; sleep 3; AGENT_BROWSER_PROFILE_RM_YES=1 "$BIN" profile rm "itest$$" >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes -idle -leak -log; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; sleep 3; AGENT_BROWSER_PROFILE_RM_YES=1 "$BIN" profile rm "itest$$" >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -655,6 +655,15 @@ R=$(ab profile list);  check "profile list shows the test profile with sizes" '(
 R=$(ab profile rm "$PN" </dev/null);  check "profile rm needs a terminal" '.error.code=="NEEDS_TERMINAL"' "$R"
 R=$(ab profile prune);  check "profile prune only lists by default" '.ok and .result.deleted==false' "$R"
 R=$(ab profile rm no-such-profile);  check "profile rm of an unknown name fails" '.error.code=="NOT_FOUND"' "$R"
+
+# --- the action log: below by default, can go to the right, keeps its size ----
+LS="$AGENT_BROWSER_SESSION-log"
+lab2() { AGENT_BROWSER_SESSION="$LS" "$BIN" "$@"; }
+lab2 open "file://$FIX/login.html" >/dev/null; lab2 watch on >/dev/null; sleep 1
+R=$(lab2 watch status);  check "log is below the page by default and has some height" '.result.log.side=="below" and .result.log.log_size[1]>=100 and .result.log.page_size[1]>.result.log.log_size[1]' "$R"
+R=$(lab2 watch log-right); sleep 1; check "the log moves to the right and has some width" '.result.log.side=="right" and .result.log.log_size[0]>=200 and .result.log.page_size[0]>200' "$R"
+R=$(lab2 watch log-below); sleep 1; check "and back below" '.result.log.side=="below"' "$R"
+lab2 watch off >/dev/null; lab2 close >/dev/null
 
 # --- idle sessions suspend media; status polling is not activity ---------
 IS="$AGENT_BROWSER_SESSION-idle"

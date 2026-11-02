@@ -12,7 +12,7 @@ final class WatchWebView: WKWebView {
 /// default, "windowless"); watch mode shows the same page on screen with a step timeline and
 /// a pause / take-over button. Showing it never activates the app or steals focus.
 @MainActor
-final class WatchWindow: NSObject, NSWindowDelegate {
+final class WatchWindow: NSObject, NSWindowDelegate, NSSplitViewDelegate {
     private let window: NSWindow
     private var webView: WatchWebView
     private let title: String
@@ -23,11 +23,19 @@ final class WatchWindow: NSObject, NSWindowDelegate {
     private let button = NSButton(title: "Pause / take over", target: nil, action: nil)
     private let timeline = NSTextView()
     private let scroll = NSScrollView()
+    private let pageArea = NSView()
+    private let split = NSSplitView()
+    private let logToggle = NSButton(title: "", target: nil, action: nil)
+    /// The action log sits below the page or to its right; you can drag the divider to resize it (kept across runs).
+    private var logOnRight = !Policy.isTestFile && UserDefaults.standard.bool(forKey: "watchLogOnRight")  // test runs neither read nor change your settings
+    private var logHeight: CGFloat = min(500, max(60, (Policy.isTestFile ? 0 : CGFloat(UserDefaults.standard.double(forKey: "watchLogHeight"))).nonZero(150)))
+    private var logWidth: CGFloat = min(900, max(120, (Policy.isTestFile ? 0 : CGFloat(UserDefaults.standard.double(forKey: "watchLogWidth"))).nonZero(340)))
+    private func savePref(_ v: Any, forKey k: String) { if !Policy.isTestFile { UserDefaults.standard.set(v, forKey: k) } }
+    private var logSize: CGFloat { logOnRight ? logWidth : logHeight }
     private(set) var visible = false
     private(set) var paused = false
 
     private static let toolbarH: CGFloat = 34
-    private static let timelineH: CGFloat = 150
     private let viewport: () -> NSSize
     private var vp: NSSize { viewport() }
 
@@ -56,13 +64,22 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         window.contentView = container
 
         webHolder.addSubview(webView)
-        container.addSubview(webHolder)
+        pageArea.addSubview(webHolder)
+        split.dividerStyle = .thin
+        split.delegate = self
+        split.addSubview(pageArea)
+        split.addSubview(scroll)
+        container.addSubview(split)
 
         status.font = .systemFont(ofSize: 12, weight: .medium)
         button.bezelStyle = .rounded
         button.target = self
         button.action = #selector(togglePause)
+        logToggle.bezelStyle = .rounded
+        logToggle.target = self
+        logToggle.action = #selector(toggleLogSide)
         toolbar.addSubview(status)
+        toolbar.addSubview(logToggle)
         toolbar.addSubview(button)
         container.addSubview(toolbar)
 
@@ -73,7 +90,7 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         timeline.autoresizingMask = [.width]
         scroll.documentView = timeline
         scroll.hasVerticalScroller = true
-        container.addSubview(scroll)
+        updateLogToggle()
 
         refreshControls()
         hide()
@@ -126,9 +143,11 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main ?? NSScreen.screens.first
         let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let chrome = Self.toolbarH + Self.timelineH
-        let scale = min(1, (vis.width - 40) / vp.width, (vis.height - 60 - chrome) / vp.height)
-        let w = (vp.width * scale).rounded(), h = (vp.height * scale).rounded()
+        let div = split.dividerThickness
+        let extraW: CGFloat = logOnRight ? logWidth + div : 0
+        let extraH = Self.toolbarH + (logOnRight ? 0 : logHeight + div)
+        let scale = min(1, (vis.width - 40 - extraW) / vp.width, (vis.height - 90 - extraH) / vp.height)
+        let w = (vp.width * scale).rounded() + extraW, h = (vp.height * scale).rounded() + extraH
 
         NSApplication.shared.setActivationPolicy(.regular)  // a Dock entry while a window is shown, as for any app window
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -137,11 +156,12 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         window.alphaValue = 1
         window.level = .normal
         window.ignoresMouseEvents = false
-        window.setContentSize(NSSize(width: w, height: h + chrome))
-        container.frame = NSRect(x: 0, y: 0, width: w, height: h + chrome)
-        layoutContent()
+        window.setContentSize(NSSize(width: w, height: h))
+        container.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        pageArea.addSubview(webHolder)
+        split.isHidden = false
         toolbar.isHidden = false
-        scroll.isHidden = false
+        layoutContent(resetDivider: true)
         window.setFrameTopLeftPoint(NSPoint(x: vis.maxX - w - 20, y: vis.maxY - 20))
         let host = Self.all.first { $0 !== self && $0.visible }
         if let host {  // join the window that is already open as another tab, at its size and place
@@ -153,25 +173,94 @@ final class WatchWindow: NSObject, NSWindowDelegate {
             window.setFrame(f, display: true)  // a display that was unplugged since falls back to the default spot above
             layoutContent()
         }
+        container.frame = NSRect(origin: .zero, size: window.contentView?.frame.size ?? container.frame.size)
+        layoutContent(resetDivider: true)  // the window may have been fitted to the screen or to a tab group meanwhile
         applyFavicon()
         window.orderFrontRegardless()  // visible, but the app is not activated
         scrollTimelineToEnd()
     }
 
-    /// Fits the page (scaled to keep its proportions), the toolbar and the timeline into the current window size.
-    private func layoutContent() {
+    /// Fits the toolbar, the page and the action log into the current window size.
+    private func layoutContent(resetDivider: Bool = false) {
         let cw = container.bounds.width, ch = container.bounds.height
-        let availH = max(1, ch - Self.toolbarH - Self.timelineH)
-        let scale = max(0.05, min(cw / vp.width, availH / vp.height))
+        toolbar.frame = NSRect(x: 0, y: ch - Self.toolbarH, width: cw, height: Self.toolbarH)
+        status.frame = NSRect(x: 10, y: 8, width: max(40, cw - 340), height: 18)
+        logToggle.frame = NSRect(x: cw - 330, y: 4, width: 150, height: 26)
+        button.frame = NSRect(x: cw - 170, y: 4, width: 160, height: 26)
+        split.isVertical = logOnRight
+        split.frame = NSRect(x: 0, y: 0, width: cw, height: max(1, ch - Self.toolbarH))
+        split.layoutSubtreeIfNeeded()
+        if resetDivider { applyDivider() }
+        layoutPage()
+    }
+
+    private func applyDivider() {
+        let total = logOnRight ? split.bounds.width : split.bounds.height
+        split.setPosition(max(200, total - logSize - split.dividerThickness), ofDividerAt: 0)
+        split.layoutSubtreeIfNeeded()
+    }
+
+    /// Scales the page to fit the space it has, keeping its proportions.
+    private func layoutPage() {
+        let a = pageArea.bounds
+        guard a.width > 0, a.height > 0 else { return }
+        let scale = max(0.05, min(a.width / vp.width, a.height / vp.height))
         let w = (vp.width * scale).rounded(), h = (vp.height * scale).rounded()
-        timeline.frame.size.width = cw
-        scroll.frame = NSRect(x: 0, y: 0, width: cw, height: Self.timelineH)
-        webHolder.frame = NSRect(x: ((cw - w) / 2).rounded(), y: Self.timelineH + ((availH - h) / 2).rounded(), width: w, height: h)
+        webHolder.frame = NSRect(x: ((a.width - w) / 2).rounded(), y: ((a.height - h) / 2).rounded(), width: w, height: h)
         webHolder.bounds = NSRect(origin: .zero, size: vp)  // scales the page to the window
         webView.frame = NSRect(origin: .zero, size: vp)
-        toolbar.frame = NSRect(x: 0, y: ch - Self.toolbarH, width: cw, height: Self.toolbarH)
-        status.frame = NSRect(x: 10, y: 8, width: max(40, cw - 190), height: 18)
-        button.frame = NSRect(x: cw - 170, y: 4, width: 160, height: 26)
+        timeline.frame.size.width = scroll.bounds.width
+    }
+
+    private func updateLogToggle() { logToggle.title = logOnRight ? "Log below" : "Log on the right" }
+
+    var logInfo: [String: Any] {
+        ["side": logOnRight ? "right" : "below", "log_size": [Int(scroll.frame.width), Int(scroll.frame.height)],
+         "page_size": [Int(pageArea.frame.width), Int(pageArea.frame.height)]]
+    }
+
+    func setLogOnRight(_ right: Bool) {
+        if right != logOnRight { toggleLogSide() }
+    }
+
+    @objc private func toggleLogSide() {
+        if !visible {  // nothing on screen to resize: remember the choice for the next time it is shown
+            logOnRight.toggle()
+            savePref(logOnRight, forKey: "watchLogOnRight")
+            updateLogToggle()
+            return
+        }
+        let div = split.dividerThickness
+        var size = window.contentView?.frame.size ?? .zero
+        if logOnRight { size.width -= logWidth + div; size.height += logHeight + div }   // log moves below the page
+        else { size.width += logWidth + div; size.height -= logHeight + div }            // log moves beside the page
+        logOnRight.toggle()
+        savePref(logOnRight, forKey: "watchLogOnRight")
+        updateLogToggle()
+        window.setContentSize(size)
+        container.frame = NSRect(origin: .zero, size: size)
+        layoutContent(resetDivider: true)
+        scrollTimelineToEnd()
+    }
+
+    // MARK: split view (the divider between the page and the log)
+
+    nonisolated func splitView(_ sv: NSSplitView, constrainMinCoordinate p: CGFloat, ofSubviewAt i: Int) -> CGFloat { 200 }
+    nonisolated func splitView(_ sv: NSSplitView, constrainMaxCoordinate p: CGFloat, ofSubviewAt i: Int) -> CGFloat {
+        (sv.isVertical ? sv.bounds.width : sv.bounds.height) - 80 - sv.dividerThickness
+    }
+    nonisolated func splitView(_ sv: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        MainActor.assumeIsolated { view !== scroll }  // the log keeps its size when the window is resized
+    }
+    nonisolated func splitViewDidResizeSubviews(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            guard visible else { return }
+            if NSApp.currentEvent?.type == .leftMouseDragged {  // you are dragging the divider (not a layout pass)
+                if logOnRight { logWidth = scroll.frame.width; savePref(Double(logWidth), forKey: "watchLogWidth") }
+                else { logHeight = scroll.frame.height; savePref(Double(logHeight), forKey: "watchLogHeight") }
+            }
+            layoutPage()
+        }
     }
 
     /// Asks the person about a page's confirm() or prompt() in a sheet on the watch window (shown if hidden).
@@ -224,7 +313,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         window.styleMask = [.borderless]
         window.ignoresMouseEvents = true
         toolbar.isHidden = true
-        scroll.isHidden = true
+        split.isHidden = true
+        webHolder.removeFromSuperview()  // hidden: the page alone fills the (off-screen) window
+        container.addSubview(webHolder)
         window.setContentSize(vp)
         container.frame = NSRect(origin: .zero, size: vp)
         webHolder.frame = NSRect(origin: .zero, size: vp)
@@ -290,4 +381,9 @@ final class WatchWindow: NSObject, NSWindowDelegate {
     private func scrollTimelineToEnd() {
         timeline.scrollRangeToVisible(NSRange(location: timeline.string.utf16.count, length: 0))
     }
+}
+
+private extension CGFloat {
+    /// This value, or `fallback` when it is zero (a setting that was never saved).
+    func nonZero(_ fallback: CGFloat) -> CGFloat { self == 0 ? fallback : self }
 }

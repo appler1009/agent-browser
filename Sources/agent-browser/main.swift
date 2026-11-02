@@ -33,6 +33,7 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   status                           session, profile, tabs
   cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
   watch [on|off|pause|resume|status]   show/hide the live watch window; pause = human takes over
+  watch log-right | log-below      put the action log beside or under the page (drag the divider to resize it)
   close                            stop the helper
   sessions                         every running session with its state (never starts one)
   menubar [start|install|uninstall]   menu bar item listing sessions: show window, take over, close; install = start at login
@@ -258,7 +259,9 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
         if let port = num("port") { args["port"] = port }
     case "watch":
         let mode = positional.first ?? "on"
-        if !["on", "off", "pause", "resume", "status"].contains(mode) { fail("USAGE", "watch takes on|off|pause|resume|status") }
+        if !["on", "off", "pause", "resume", "status", "log-right", "log-below"].contains(mode) {
+            fail("USAGE", "watch takes on|off|pause|resume|status|log-right|log-below")
+        }
         args["mode"] = mode
     case "screenshot":
         let p = positional.first ?? "screenshot.png"
