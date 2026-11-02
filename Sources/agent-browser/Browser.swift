@@ -568,7 +568,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             let sock = daemonSocketPath
             // Persistent profiles need time to flush cookies/storage to disk. A round trip to the network
             // process first makes sure it has seen every recent cookie change; the pause lets it write them.
-            if daemonProfile != nil { _ = await webView.configuration.websiteDataStore.httpCookieStore.allCookies() }
+            if daemonProfile != nil { await flushCookies() }
             let delay = daemonProfile == nil ? 0.1 : 2.0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 if !sock.isEmpty { unlink(sock) }
@@ -577,6 +577,25 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             return ["closed": true]
         default:
             throw CmdError(code: "USAGE", message: "unknown command \"\(cmd)\"")
+        }
+    }
+
+    /// Asks WebKit to write cookies to disk now. Older macOS versions only do it on a timer, and the helper
+    /// exits right after `close`. Uses WebKit's own flush call when present (it is not public API), and
+    /// otherwise falls back to a round trip to the network process plus the wait in `close`.
+    private func flushCookies() async {
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        _ = await store.allCookies()
+        let sel = NSSelectorFromString("_flushCookiesToDiskWithCompletionHandler:")
+        guard store.responds(to: sel) else { return }
+        final class Once: @unchecked Sendable { var done = false }
+        let once = Once()
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let finish: @convention(block) () -> Void = {
+                DispatchQueue.main.async { if !once.done { once.done = true; c.resume() } }
+            }
+            _ = store.perform(sel, with: unsafeBitCast(finish, to: AnyObject.self))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if !once.done { once.done = true; c.resume() } }
         }
     }
 

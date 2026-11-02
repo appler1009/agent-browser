@@ -180,7 +180,12 @@ cat > "$HOME/.ab-itest-cookie.json" <<'JSON'
 JSON
 pab cookies import "$HOME/.ab-itest-cookie.json" >/dev/null; rm -f "$HOME/.ab-itest-cookie.json"
 pab close >/dev/null; sleep 2
+F0=$FAIL
 R=$(pab cookies export);                          check "cookie survives helper restart with the same profile" '.result.cookies|map(select(.name=="keep"))|length==1' "$R"
+if [ "$FAIL" -gt "$F0" ]; then  # help diagnose runner-specific storage behaviour
+  echo "       macOS $(sw_vers -productVersion); recently written WebKit/cookie files:"
+  find "$HOME/Library" -type f -mmin -3 \( -iname '*cookie*' -o -path '*WebKit*' -o -path '*HTTPStorages*' \) 2>/dev/null | head -20 | sed 's/^/         /'
+fi
 pab cookies clear >/dev/null; pab close >/dev/null; sleep 1.5
 R=$(AGENT_BROWSER_SESSION="$PS" "$BIN" cookies export); check "a temporary session does not see the profile's cookies" '.result.count==0' "$R"
 AGENT_BROWSER_SESSION="$PS" "$BIN" close >/dev/null
