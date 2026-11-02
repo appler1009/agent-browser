@@ -566,8 +566,10 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
         case "watch": return try watchCommand(args)
         case "close":
             let sock = daemonSocketPath
-            // Persistent profiles get a moment to flush cookies/storage to disk.
-            let delay = daemonProfile == nil ? 0.1 : 0.8
+            // Persistent profiles need time to flush cookies/storage to disk. A round trip to the network
+            // process first makes sure it has seen every recent cookie change; the pause lets it write them.
+            if daemonProfile != nil { _ = await webView.configuration.websiteDataStore.httpCookieStore.allCookies() }
+            let delay = daemonProfile == nil ? 0.1 : 2.0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 if !sock.isEmpty { unlink(sock) }
                 exit(0)
