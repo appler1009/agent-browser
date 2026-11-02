@@ -310,6 +310,11 @@ func vaultAudit(_ store: VaultStore, _ fields: [String: Any]) {
     let path = store.auditPath
     try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
+    // Keeps the log from growing for ever: past 5 MB it moves to `.1` (one older file is kept).
+    if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int, size > 5_000_000 {
+        try? FileManager.default.removeItem(atPath: path + ".1")
+        try? FileManager.default.moveItem(atPath: path, toPath: path + ".1")
+    }
     if !FileManager.default.fileExists(atPath: path) {
         FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600])
     }

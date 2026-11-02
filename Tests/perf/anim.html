@@ -1,0 +1,4 @@
+<!doctype html><title>anim</title><style>@keyframes s{to{transform:rotate(360deg)}}.b{width:80px;height:80px;background:#c33;animation:s 1s linear infinite}</style>
+<div class=b></div><canvas id=c width=400 height=300></canvas><script>
+const x=document.getElementById('c').getContext('2d');let n=0;function f(){n++;x.clearRect(0,0,400,300);for(let i=0;i<300;i++){x.fillRect((i*7+n)%400,(i*13+n*2)%300,5,5)}requestAnimationFrame(f)}f();
+setInterval(()=>{document.title='anim '+n},100);</script>

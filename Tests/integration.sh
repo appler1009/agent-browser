@@ -592,6 +592,9 @@ else PASS=$((PASS+1)); echo "ok   - no stored secret appears in any command outp
 R=$(ab vault origin guarded --add https://more.example.com);  check "vault origin on a --confirm entry is denied without approval" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"
 R=$(AGENT_BROWSER_VAULT_APPROVE=yes ab vault origin guarded --add https://more.example.com);  check "vault origin on a --confirm entry works when approved" '.ok and .result.changed' "$R"
 R=$(ab vault audit --limit 100);  check "audit records origin changes with old and new sites" '[.result.entries[]|select(.action=="origin")]|length>=3' "$R"
+head -c 6000000 /dev/zero >> "$AGENT_BROWSER_VAULT_FILE.audit"   # a log past 5 MB rotates
+AGENT_BROWSER_VAULT_APPROVE=yes ab vault origin guarded --remove https://more.example.com >/dev/null
+[ -f "$AGENT_BROWSER_VAULT_FILE.audit.1" ] && [ "$(stat -f %z "$AGENT_BROWSER_VAULT_FILE.audit")" -lt 5000 ] && { PASS=$((PASS+1)); echo "ok   - the audit log rotates past 5 MB"; } || { FAIL=$((FAIL+1)); echo "FAIL - audit log did not rotate"; }
 R=$(ab vault rm guarded);                         check "vault rm" '.ok and .result.removed=="guarded"' "$R"
 R=$(ab vault list);                               check "vault list after rm" '(.result.entries|map(.name)|index("guarded"))==null' "$R"
 

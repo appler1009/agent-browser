@@ -152,6 +152,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 
 ```sh
 Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 311 checks; needs jq, optionally node 22+ and network)
+Tests/perf.sh                # CPU and memory of the host and its WebKit helpers in a few scenarios (macOS tools only)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 
