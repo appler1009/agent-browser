@@ -85,7 +85,11 @@ final class WatchWindow: NSObject, NSWindowDelegate {
 
     // MARK: show / hide
 
+    /// Where you left the window (position and size), so showing it again puts it back there.
+    private var savedFrame: NSRect?
+
     func show() {
+        if visible && window.isVisible { savedFrame = window.frame }
         visible = true
         // The screen the pointer is on, so the window appears where the person is looking
         // (NSScreen.main can be another display for a background app).
@@ -109,6 +113,10 @@ final class WatchWindow: NSObject, NSWindowDelegate {
         toolbar.isHidden = false
         scroll.isHidden = false
         window.setFrameTopLeftPoint(NSPoint(x: vis.maxX - w - 20, y: vis.maxY - 20))
+        if let f = savedFrame, NSScreen.screens.contains(where: { $0.visibleFrame.intersection(f).width >= 100 && $0.visibleFrame.intersection(f).height >= 60 }) {
+            window.setFrame(f, display: true)  // a display that was unplugged since falls back to the default spot above
+            layoutContent()
+        }
         window.orderFrontRegardless()  // visible, but the app is not activated
         scrollTimelineToEnd()
     }
@@ -163,10 +171,15 @@ final class WatchWindow: NSObject, NSWindowDelegate {
     }
 
     nonisolated func windowDidResize(_ notification: Notification) {
-        MainActor.assumeIsolated { if visible { layoutContent() } }
+        MainActor.assumeIsolated { if visible { layoutContent(); savedFrame = window.frame } }
+    }
+
+    nonisolated func windowDidMove(_ notification: Notification) {
+        MainActor.assumeIsolated { if visible && window.isVisible { savedFrame = window.frame } }
     }
 
     func hide() {
+        if visible && window.isVisible { savedFrame = window.frame }
         visible = false
         window.styleMask = [.borderless]
         window.ignoresMouseEvents = true
