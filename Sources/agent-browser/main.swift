@@ -12,7 +12,10 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   fill <ref> <text...>
   fill <ref> --secret <entry> [--field username|password|totp]   type a vault value; the agent never sees it
   login <entry> [--submit]         fill the username/password/one-time-code fields on the page from a vault entry
-  vault list | audit [--limit N]   saved logins (names and sites only); `vault add|rm` are for the user, in a terminal
+  totp enroll <entry> [--replace]  on a 2FA setup page: read the setup key / otpauth link / QR code straight into the entry
+  recovery save <entry> [--selector CSS]   save the recovery codes shown on the page into the entry
+  vault list | audit [--limit N]   saved logins (names and sites only)
+  vault add|rm|export|recovery     for the user, in a terminal: create/remove entries, back up TOTP secrets and recovery codes
   submit <ref>                     ref may be the form or any control inside it
   wait [--load] [--idle] [--download] [--selector CSS] [--gone CSS] [--text T] [--url SUBSTR] [--ms N] [--timeout MS]
   screenshot [path]                default ./screenshot.png
@@ -92,7 +95,7 @@ func absolutePath(_ p: String) -> String {
 func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
     var positional: [String] = []
     var flags: [String: String] = [:]
-    let boolFlags: Set<String> = cmd == "snapshot" ? ["text", "interactive"] : ["load", "idle", "download", "submit"]
+    let boolFlags: Set<String> = cmd == "snapshot" ? ["text", "interactive"] : ["load", "idle", "download", "submit", "replace"]
     var i = 0
     while i < rest.count {
         let a = rest[i]
@@ -154,6 +157,17 @@ func buildRequest(_ cmd: String, _ rest: [String]) -> ([String: Any], Bool) {
             args["ref"] = positional[0]
             args["text"] = positional[1...].joined(separator: " ")
         }
+    case "totp":
+        needPositional(2, "enroll <entry> [--replace]")
+        if positional[0] != "enroll" { fail("USAGE", "totp takes: enroll <entry> [--replace]") }
+        args["secret"] = positional[1]
+        if flags["replace"] != nil { args["replace"] = true }
+        return (["cmd": "enroll", "args": args], false)
+    case "recovery":
+        needPositional(2, "save <entry> [--selector CSS]")
+        if positional[0] != "save" { fail("USAGE", "recovery takes: save <entry> [--selector CSS]") }
+        args["secret"] = positional[1]
+        if let v = flags["selector"] { args["selector"] = v }
     case "login":
         needPositional(1, "<entry>")
         args["secret"] = positional[0]

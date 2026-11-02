@@ -1,0 +1,7 @@
+<!doctype html><html><head><title>Set up two-factor</title></head><body>
+<h1>Set up two-factor authentication</h1>
+<img src="totp-qr.png" width="240" height="240" alt="QR code">
+<p>Can't scan? Enter this setup key: <code>JBSW Y3DP EHPK 3PXP</code></p>
+<p id="status"></p><label for="c">Verification code</label><input id="c" name="code" inputmode="numeric" autocomplete="off">
+<script>const expect=new URLSearchParams(location.search).get("expect");document.getElementById("c").addEventListener("input",e=>{document.getElementById("status").textContent=e.target.value===expect?"OTP OK":"OTP BAD"});</script>
+</body></html>

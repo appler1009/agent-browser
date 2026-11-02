@@ -1,3 +1,4 @@
+import CoreImage
 import Foundation
 
 // `agent-browser vault ...`: managing entries. Runs in the CLI process (no helper needed).
@@ -58,7 +59,7 @@ func runVaultCLI(_ args: [String]) -> Never {
             fail("SELFTEST_FAILED", bad.joined(separator: "; "))
 
         case "list":
-            let rows = try store.list().map { ["name": $0.name, "origins": $0.meta.origins, "totp": $0.meta.totp, "confirm": $0.meta.confirm, "created": $0.meta.created] as [String: Any] }
+            let rows = try store.list().map { ["name": $0.name, "origins": $0.meta.origins, "totp": $0.meta.totp, "confirm": $0.meta.confirm, "recovery": $0.meta.recovery ?? 0, "created": $0.meta.created] as [String: Any] }
             vaultOut(["store": store.isTestStore ? "file (test)" : "keychain", "entries": rows])
 
         case "audit":
@@ -66,6 +67,56 @@ func runVaultCLI(_ args: [String]) -> Never {
             let text = (try? String(contentsOfFile: store.auditPath, encoding: .utf8)) ?? ""
             let lines = text.split(separator: "\n").suffix(limit).compactMap { parseJSON(String($0)) }
             vaultOut(["entries": lines])
+
+        case "export":
+            needInteractive("vault export")
+            let qr = takeFlag("qr")
+            let asJSON = takeFlag("json")
+            guard let name = rest.first, validVaultName(name) else { fail("USAGE", "vault export <name> [--qr] [--json]") }
+            guard let entry = try store.get(name) else { fail("VAULT_NO_ENTRY", "no vault entry \"\(name)\"") }
+            guard entry.secret.totp != nil || !(entry.secret.recovery ?? []).isEmpty else {
+                fail("VAULT_NO_FIELD", "entry \"\(name)\" has no TOTP secret or recovery codes to export")
+            }
+            let a = requestApprovalSync(reason: "agent-browser wants to show the 2FA backup for \"\(name)\"", store: store)
+            guard a.ok else {
+                vaultAudit(store, ["entry": name, "action": "export", "outcome": "APPROVAL_DENIED", "why": a.why])
+                fail("VAULT_APPROVAL_DENIED", "export was not approved (\(a.why)).")
+            }
+            vaultAudit(store, ["entry": name, "action": "export", "outcome": "ok"])
+            var out: [String: Any] = ["name": name, "origins": entry.meta.origins, "username": entry.secret.username]
+            var uri = ""
+            if let t = entry.secret.totp {
+                let p = try parseTOTP(t)
+                let issuer = URL(string: entry.meta.origins.first ?? "")?.host ?? name
+                uri = otpauthURI(stored: t, issuer: issuer, account: entry.secret.username)
+                let left = p.period - Int(Date().timeIntervalSince1970) % p.period
+                out["totp"] = ["secret": base32Encode(p.secret), "uri": uri, "digits": p.digits, "period": p.period,
+                               "algorithm": p.algorithm, "current_code": totpCode(p), "valid_for_seconds": left] as [String: Any]
+            }
+            if let r = entry.secret.recovery, !r.isEmpty { out["recovery_codes"] = r }
+            if asJSON { vaultOut(out) }
+            var text = "\(name)  (\(entry.meta.origins.joined(separator: ", ")))\nusername: \(entry.secret.username)\n"
+            if let t = out["totp"] as? [String: Any] {
+                text += "\nTOTP secret: \(t["secret"] as! String)\notpauth link: \(t["uri"] as! String)\ncurrent code: \(t["current_code"] as! String) (valid for \(t["valid_for_seconds"] as! Int) s)\n"
+            }
+            if let r = out["recovery_codes"] as? [String] { text += "\nrecovery codes (\(r.count)):\n" + r.map { "  \($0)" }.joined(separator: "\n") + "\n" }
+            text += "\nKeep this somewhere safe (a password manager, or printed and stored offline). The vault itself is only in this Mac's login keychain.\n"
+            print(text)
+            if qr && !uri.isEmpty { printQR(uri) }
+            exit(0)
+
+        case "recovery":
+            needInteractive("vault recovery")
+            guard let name = rest.first, validVaultName(name), var entry = try store.get(name) else { fail("USAGE", "vault recovery <name>  (entry must exist)") }
+            FileHandle.standardError.write(Data("Paste the recovery codes for \(name), one per line, then an empty line:\n".utf8))
+            var codes: [String] = []
+            while let l = readLine(strippingNewline: true), !l.trimmingCharacters(in: .whitespaces).isEmpty { codes.append(l.trimmingCharacters(in: .whitespaces)) }
+            guard !codes.isEmpty else { fail("USAGE", "no codes entered") }
+            entry.secret.recovery = codes
+            entry.meta.recovery = codes.count
+            try store.put(entry, replace: true)
+            vaultAudit(store, ["entry": name, "action": "recovery", "count": codes.count, "outcome": "ok"])
+            vaultOut(["entry": name, "saved": codes.count])
 
         case "rm":
             needInteractive("vault rm")
@@ -113,4 +164,23 @@ func runVaultCLI(_ args: [String]) -> Never {
     } catch {
         fail("VAULT_ERROR", "\(error)")
     }
+}
+
+/// Prints a QR code with explicit black/white cells so it scans on both light and dark terminals.
+func printQR(_ text: String) {
+    guard let f = CIFilter(name: "CIQRCodeGenerator") else { return }
+    f.setValue(Data(text.utf8), forKey: "inputMessage")
+    f.setValue("M", forKey: "inputCorrectionLevel")
+    guard let img = f.outputImage, let cg = CIContext().createCGImage(img, from: img.extent) else { return }
+    let w = cg.width, h = cg.height
+    var px = [UInt8](repeating: 255, count: w * h)
+    let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                        bitmapInfo: CGImageAlphaInfo.none.rawValue)
+    ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let white = "\u{1B}[107m  \u{1B}[0m", black = "\u{1B}[40m  \u{1B}[0m"
+    let quiet = String(repeating: white, count: w + 4)
+    var out = [quiet, quiet]
+    for y in 0..<h { out.append(white + white + (0..<w).map { px[y * w + $0] < 128 ? black : white }.joined() + white + white) }
+    out += [quiet, quiet]
+    print(out.joined(separator: "\n"))
 }

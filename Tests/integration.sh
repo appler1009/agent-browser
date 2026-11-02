@@ -193,7 +193,7 @@ OUT=$( { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   call 4 browser_snapshot '{}'; } | rpc)
 line() { echo "$OUT" | jq -c "select(.id==$1)"; }
 check "mcp initialize returns tools capability and instructions" '.result.capabilities.tools and (.result.instructions|length>50)' "$(line 1)"
-check "mcp tools/list has all 23 tools" '(.result.tools|length)==23 and ([.result.tools[].name]|(index("browser_login")!=null and index("browser_fill_secret")!=null and index("browser_vault_list")!=null))' "$(line 2)"
+check "mcp tools/list has all 25 tools" '(.result.tools|length)==25 and ([.result.tools[].name]|(index("browser_login")!=null and index("browser_fill_secret")!=null and index("browser_vault_list")!=null))' "$(line 2)"
 check "mcp browser_open ok" '.result.isError==false' "$(line 3)"
 check "mcp snapshot is plain text tree with refs" '.result.content[0].text|test("snapshot s[0-9]+") and test("@s[0-9]+:e1")' "$(line 4)"
 MBUY=$(line 4 | jq -r '.result.content[0].text' | grep 'Buy now' | grep -oE '@s[0-9]+:e[0-9]+')
@@ -331,6 +331,70 @@ for mode in yes no; do
   else check "confirm entry is not used when the person says no" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"; fi
 done
 
+
+# --- 2FA enrollment: capture the secret on a signup page without the agent seeing it ---
+KEY='JBSWY3DPEHPK3PXP'
+for e in signup qronly keyonly conflict; do printf '%s\n' "$PW" | ab vault add $e --origin file:// --username alice >/dev/null; done
+vab open "file://$FIX/totp-setup.html" >/dev/null
+T=$(vab snapshot --text)
+echo "$T" | grep -q 'hidden: possible 2FA setup key' && ! echo "$T" | grep -q -e 'Y3DP' -e "$KEY" && { PASS=$((PASS+1)); echo "ok   - snapshot hides the 2FA setup key"; } || { FAIL=$((FAIL+1)); echo "FAIL - setup key visible in snapshot"; echo "$T"; }
+R=$(vab totp enroll signup);                      check "totp enroll reads the QR/key and saves it (no secret in the result)" '.ok and .result.saved==true and .result.issuer=="Example" and .result.account=="alice" and .result.digits==6' "$R"
+echo "$R" | grep -q -e "$KEY" -e 'secret=' && { FAIL=$((FAIL+1)); echo "FAIL - enroll result leaked the secret"; } || { PASS=$((PASS+1)); echo "ok   - enroll result holds no secret"; }
+R=$(ab vault list);                               check "vault list shows totp:true after enroll" '(.result.entries[]|select(.name=="signup")|.totp)==true' "$R"
+R=$(vab totp enroll signup);                      check "totp enroll refuses to overwrite without --replace" '.ok==false and .error.code=="VAULT_HAS_TOTP"' "$R"
+R=$(vab totp enroll signup --replace);            check "totp enroll --replace" '.ok and .result.saved==true' "$R"
+[ $(( $(date +%s) % 30 )) -ge 27 ] && sleep 4
+CODE2=$(python3 - <<PY
+import hmac,hashlib,struct,time,base64
+k=base64.b32decode("$KEY"); c=struct.pack(">Q",int(time.time())//30)
+h=hmac.new(k,c,hashlib.sha1).digest(); o=h[-1]&15
+print("%06d"%((struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000))
+PY
+)
+AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" open "file://$FIX/totp-setup.html?expect=$CODE2" >/dev/null
+T=$(vab snapshot | jq -r .result.tree); C=$(ref "$T" 'Verification code')
+R=$(vab fill "$C" --secret signup --field totp);  check "the enrolled secret produces the right code" '.ok' "$R"
+vab wait --text "OTP OK" --timeout 3000 | jq -e '.ok' >/dev/null && { PASS=$((PASS+1)); echo "ok   - code from the enrolled secret is accepted by the page"; } || { FAIL=$((FAIL+1)); echo "FAIL - enrolled secret gave a wrong code"; }
+vab open "file://$FIX/totp-qr-only.html" >/dev/null
+R=$(vab totp enroll qronly);                      check "enroll from a QR image alone (Vision decode)" '.ok and .result.source=="qr" and .result.issuer=="Example"' "$R"
+vab open "file://$FIX/totp-key-only.html" >/dev/null
+T=$(vab snapshot --text)
+echo "$T" | grep -q "$KEY" && { FAIL=$((FAIL+1)); echo "FAIL - key in an input value visible in snapshot"; } || { PASS=$((PASS+1)); echo "ok   - setup key in an input value is hidden too"; }
+R=$(vab totp enroll keyonly);                     check "enroll from a setup key alone" '.ok and .result.source=="key"' "$R"
+vab open "file://$FIX/totp-conflict.html" >/dev/null
+R=$(vab totp enroll conflict);                    check "conflicting secrets on a page -> TOTP_AMBIGUOUS, nothing saved" '.ok==false and .error.code=="TOTP_AMBIGUOUS"' "$R"
+R=$(ab vault list);                               check "ambiguous enroll left the entry without TOTP" '(.result.entries[]|select(.name=="conflict")|.totp)==false' "$R"
+vab open "file://$FIX/done.html" >/dev/null
+R=$(vab totp enroll conflict);                    check "page without 2FA setup -> TOTP_NOT_FOUND" '.ok==false and .error.code=="TOTP_NOT_FOUND"' "$R"
+vab open "file://$FIX/totp-setup.html" >/dev/null
+R=$(vab totp enroll other);                       check "enroll for an entry of another site -> ORIGIN_MISMATCH" '.ok==false and .error.code=="ORIGIN_MISMATCH"' "$R"
+
+# recovery codes
+vab open "file://$FIX/recovery.html" >/dev/null
+R=$(vab recovery save signup);                    check "recovery save finds the code list" '.ok and .result.saved==8' "$R"
+echo "$R" | grep -q 'a1b2' && { FAIL=$((FAIL+1)); echo "FAIL - recovery codes in result"; } || { PASS=$((PASS+1)); echo "ok   - recovery result holds no codes"; }
+T=$(vab snapshot --text)
+echo "$T" | grep -q -e 'a1b2-c3d4' -e 'd6e7-f8g9' && { FAIL=$((FAIL+1)); echo "FAIL - saved recovery codes still visible"; } || { PASS=$((PASS+1)); echo "ok   - saved recovery codes are redacted from later snapshots"; }
+R=$(vab recovery save signup --selector '#codes'); check "recovery save with a selector" '.ok and .result.saved==8' "$R"
+R=$(vab recovery save signup --selector 'h1');    check "recovery save rejects a non-code element" '.ok==false and .error.code=="NO_RECOVERY_CODES"' "$R"
+R=$(ab vault list);                               check "vault list counts recovery codes" '(.result.entries[]|select(.name=="signup")|.recovery)==8' "$R"
+
+# export: the person gets the backup, the agent cannot
+R=$(ab vault export signup --json);               check "export without approval is denied" '.ok==false and .error.code=="VAULT_APPROVAL_DENIED"' "$R"
+R=$(AGENT_BROWSER_VAULT_APPROVE=yes ab vault export signup --json)
+check "export shows the secret, link, current code and recovery codes" '.ok and .result.totp.secret=="JBSWY3DPEHPK3PXP" and (.result.totp.uri|startswith("otpauth://totp/")) and (.result.totp.current_code|test("^[0-9]{6}$")) and (.result.recovery_codes|length)==8' "$R"
+[ "$(echo "$R" | jq -r .result.totp.current_code)" = "$(python3 - <<PY
+import hmac,hashlib,struct,time,base64
+k=base64.b32decode("$KEY"); c=struct.pack(">Q",int(time.time())//30)
+h=hmac.new(k,c,hashlib.sha1).digest(); o=h[-1]&15
+print("%06d"%((struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000))
+PY
+)" ] && { PASS=$((PASS+1)); echo "ok   - exported current code matches an independent TOTP"; } || { FAIL=$((FAIL+1)); echo "FAIL - exported current code differs"; }
+TXT=$(AGENT_BROWSER_VAULT_APPROVE=yes ab vault export signup --qr)
+echo "$TXT" | grep -q 'TOTP secret: JBSWY3DPEHPK3PXP' && echo "$TXT" | grep -q $'\033\[107m' && { PASS=$((PASS+1)); echo "ok   - export prints the human-readable backup and a QR code"; } || { FAIL=$((FAIL+1)); echo "FAIL - export text/QR"; echo "$TXT" | head -5; }
+R=$(env -u AGENT_BROWSER_VAULT_FILE "$BIN" vault export signup </dev/null);  check "export needs a terminal" '.ok==false and .error.code=="VAULT_NEEDS_TTY"' "$R"
+R=$(ab vault audit --limit 100);                  check "audit records enroll, recovery and export" '([.result.entries[].action]|index("enroll")!=null and index("recovery")!=null and index("export")!=null)' "$R"
+
 # audit trail
 R=$(ab vault audit --limit 50);                   check "audit records fills, mismatches and denials" '.ok and ([.result.entries[].outcome]|index("ok")!=null and index("ORIGIN_MISMATCH")!=null and index("APPROVAL_DENIED")!=null) and ([.result.entries[]|select(.action=="login")]|length>=3)' "$R"
 # mcp
@@ -338,7 +402,7 @@ M=$( { printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"p
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"browser_vault_list","arguments":{}}}'; sleep 1; } | AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" mcp | sed -n 2p )
 check "mcp browser_vault_list returns names without values" '.result.isError==false and (.result.content[0].text|contains("site") and (contains("Zq9")|not))' "$M"
 # nothing the agent could see contains a stored value
-if grep -q -e "$PW" -e "$PW2" -e "$TSECRET" -e "$CODE" "$VT/all-output.log" "$VT/vault.json.audit"; then
+if grep -q -e "$PW" -e "$PW2" -e "$TSECRET" -e "$CODE" -e "$KEY" -e 'Y3DP' -e 'a1b2-c3d4' "$VT/all-output.log" "$VT/vault.json.audit"; then
   FAIL=$((FAIL+1)); echo "FAIL - a stored secret appeared in command output or the audit log"; grep -n -e "$PW" -e "$PW2" -e "$CODE" "$VT/all-output.log" | cut -c1-200 | head -3
 else PASS=$((PASS+1)); echo "ok   - no stored secret appears in any command output or the audit log"; fi
 R=$(ab vault rm guarded);                         check "vault rm" '.ok and .result.removed=="guarded"' "$R"

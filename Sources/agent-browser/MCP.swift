@@ -37,6 +37,11 @@ private let mcpTools: [[String: Any]] = [
           "field": ["type": "string", "enum": ["username", "password", "totp"], "description": "default password"]], required: ["ref", "secret"]),
     tool("browser_login", "Sign in with a vault entry: finds the visible username, password and one-time-code fields on the current page and fills them (optionally submitting). For two-step logins call it again on the next step.",
          ["secret": ["type": "string", "description": "vault entry name"], "submit": ["type": "boolean", "description": "submit the form afterwards"]], required: ["secret"]),
+    tool("browser_totp_enroll", "On a page that shows 2FA setup (QR code, setup key or otpauth link), save the secret straight into a vault entry. You never see the secret. Afterwards type the current code with browser_fill_secret (field totp) into the page's verification field.",
+         ["secret": ["type": "string", "description": "vault entry name (must exist and match this site)"],
+          "replace": ["type": "boolean", "description": "overwrite an existing TOTP secret"]], required: ["secret"]),
+    tool("browser_recovery_save", "Save the recovery/backup codes shown on the current page into a vault entry without returning them to you. Pass selector if the codes cannot be found automatically.",
+         ["secret": ["type": "string"], "selector": ["type": "string", "description": "CSS selector of the element holding only the codes"]], required: ["secret"]),
     tool("browser_submit", "Submit a form (ref may be the form or any control in it). Respects HTML validation and reports the first invalid field.",
          ["ref": sRef], required: ["ref"]),
     tool("browser_wait", "Wait until all given conditions hold, or time out. Provide at least one condition.",
@@ -104,6 +109,11 @@ private func toolRequest(_ name: String, _ a: [String: Any]) -> [String: Any]? {
         if !s("field").isEmpty { args["field"] = s("field") }
         return ["cmd": "fill", "args": args]
     case "browser_login": return ["cmd": "login", "args": ["secret": s("secret"), "submit": a["submit"] as? Bool == true]]
+    case "browser_totp_enroll": return ["cmd": "enroll", "args": ["secret": s("secret"), "replace": a["replace"] as? Bool == true]]
+    case "browser_recovery_save":
+        var args: [String: Any] = ["secret": s("secret")]
+        if !s("selector").isEmpty { args["selector"] = s("selector") }
+        return ["cmd": "recovery", "args": args]
     case "browser_submit": return ["cmd": "submit", "args": ["ref": s("ref")]]
     case "browser_wait":
         var args: [String: Any] = [:]

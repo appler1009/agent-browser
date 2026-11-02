@@ -46,7 +46,8 @@ The first command starts a background helper that owns the page (`close` stops i
 | `cookies export [file]` / `import <file>` / `clear`, `storage export` / `import` | move login state in or out |
 | `viewport [W H]`, `useragent <ua>\|reset`, `block images\|media\|fonts\|scripts\|styles\|url <re>\|clear` | page environment |
 | `watch [on\|off\|pause\|resume\|status]` | live window; `pause` hands control to you |
-| `vault list` / `audit` (`add`, `rm` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
+| `totp enroll <entry>`, `recovery save <entry>` | capture 2FA setup secrets and recovery codes straight into the vault |
+| `vault list` / `audit` (`add`, `rm`, `export` are for you) | saved logins, see [Vault](#vault-logins-for-bots) |
 | `status`, `cdp`, `mcp`, `close` | |
 
 `--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). Exported cookie files are written `0600`.
@@ -70,7 +71,7 @@ The first command starts a background helper that owns the page (`close` stops i
 claude mcp add agent-browser -- /path/to/agent-browser mcp
 ```
 
-23 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
+25 tools (`browser_open`, `browser_snapshot`, `browser_click`, `browser_login`, …) map one to one onto the commands above. Usage guidance is sent in the server's `instructions`.
 
 ## Vault (logins for bots)
 
@@ -86,10 +87,12 @@ agent-browser fill @s1:e4 --secret github --field password
 - **Locked to the site.** An entry only works on its own origin (https, or http on localhost); elsewhere you get `ORIGIN_MISMATCH` and nothing is typed. The check also runs inside the page at fill time.
 - **`vault add` and `rm` need an interactive terminal**, so a program cannot create, replace or delete entries. Replacing an entry means typing the password again.
 - **`--totp`** stores a base32 secret or `otpauth://` URI; `login` fills the current code. **`--confirm`** asks for Touch ID or your password on every use.
+- **Signing up with 2FA:** on the setup page, `totp enroll github` reads the QR code (decoded with Vision), the `otpauth://` link or the setup key and saves it into the entry; the agent never receives it, and snapshots hide setup keys and links. It refuses to guess if the page shows different secrets. Then `fill REF --secret github --field totp` types the first code. `recovery save github` stores the recovery codes the same way (`--selector CSS` if they aren't found automatically).
+- **Your own backup:** `agent-browser vault export github [--qr]` (terminal only, asks for Touch ID or your password) prints the TOTP secret, the `otpauth://` link, the current code and the recovery codes, and can draw a QR code to scan into your own authenticator. Store that in your password manager or print it; the vault lives only in this Mac's login keychain and does not sync.
 - **Audit:** every use is logged without values to `~/.agent-browser/vault-audit.log` (`vault audit`).
 - **Not combined with DevTools:** a session that typed secrets refuses `cdp start`, and entries are refused while it runs, since a DevTools client could read the page.
 
-The vault protects the password and the TOTP seed. It does not hide the signed-in session itself (`cookies export` still returns session cookies), a visible one-time code can show up in a screenshot, and a compromised site you allowed can read what you type into it.
+The vault protects the password and the TOTP seed. A setup page shows its key before enrollment, so an agent that screenshots it first can still see the QR code; recovery codes are visible to an agent that reads that page before `recovery save` (afterwards they are redacted from output). It does not hide the signed-in session itself (`cookies export` still returns session cookies), a visible one-time code can show up in a screenshot, and a compromised site you allowed can read what you type into it.
 
 ## DevTools protocol (thin)
 

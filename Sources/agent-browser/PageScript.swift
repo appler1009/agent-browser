@@ -237,7 +237,7 @@ let pageScript = #"""
     function emit(depth, text, always) {
       if (onlyInteractive && !always) return false;
       if (truncated) return false;
-      const line = '  '.repeat(onlyInteractive ? 0 : depth) + text;
+      const line = '  '.repeat(onlyInteractive ? 0 : depth) + hideSetupSecrets(text);
       if (count >= MAX || (MAXCH && chars + line.length + 1 > MAXCH)) { truncated = true; return false; }
       count++; chars += line.length + 1;
       lines.push(line);
@@ -447,6 +447,78 @@ let pageScript = #"""
     } catch (e) {
       return err('ACTION_FAILED', String(e && e.message || e), { retry_safe: false });
     }
+  };
+
+  // ---- 2FA setup secrets: never shown in snapshots, found by `totp enroll` ----------------------
+  const KEY_RE = /\b(?:[A-Za-z2-7]{4}[ -]){3,15}[A-Za-z2-7]{1,4}\b|\b[A-Za-z2-7]{16,64}\b/g;
+  const OTPAUTH_RE = /otpauth:\/\/[^\s"'<>]+/gi;
+  const looksLikeKey = (m) => /[2-7]/.test(m) && /[A-Za-z]/.test(m);
+  function hideSetupSecrets(t) {
+    return String(t).replace(OTPAUTH_RE, '[hidden: 2FA setup link; use totp enroll]')
+      .replace(KEY_RE, (m) => looksLikeKey(m) ? '[hidden: possible 2FA setup key; use totp enroll]' : m);
+  }
+  API.findSetup = function () {
+    const uris = new Set(), keys = new Set();
+    const norm = (x) => x.replace(/[\s-]/g, '').toUpperCase();
+    const CODEY = ['CODE', 'KBD', 'PRE', 'SAMP', 'INPUT', 'STRONG', 'B', 'TEXTAREA'];
+    for (const el of document.querySelectorAll('*')) {
+      for (const a of ['href', 'src', 'value', 'data-clipboard-text', 'data-secret', 'data-key', 'title', 'aria-label']) {
+        const v = el.getAttribute(a);
+        if (v) for (const m of v.match(OTPAUTH_RE) || []) uris.add(m);
+      }
+      if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TITLE', 'OPTION'].includes(el.tagName)) continue;
+      const leaf = el.children.length === 0 || ['CODE', 'KBD', 'PRE', 'SAMP'].includes(el.tagName);
+      if (!leaf && el.tagName !== 'INPUT') continue;
+      const t = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? (el.value || '') : (el.textContent || '');
+      if (!t || t.length > 300) continue;
+      for (const m of t.match(OTPAUTH_RE) || []) uris.add(m);
+      for (const m of t.match(KEY_RE) || []) if (looksLikeKey(m)) keys.add(norm(m));
+      const n = norm(t.trim());
+      const ctx = (el.parentElement ? el.parentElement.textContent : '').slice(0, 300);
+      // A key without digits (rare) is only trusted in a code-like element next to a label that talks about keys.
+      if (/^[A-Z2-7]{16,64}$/.test(n) && CODEY.includes(el.tagName) && /key|secret|manual|setup|authenticator/i.test(ctx)) keys.add(n);
+    }
+    API.qrList = Array.from(document.querySelectorAll('img,canvas,svg')).filter((el) => {
+      if (isHidden(el)) return false;
+      const r = el.getBoundingClientRect();
+      return r.width >= 80 && r.height >= 80 && r.width <= 1200 && r.height <= 1200 && r.width / r.height > 0.8 && r.width / r.height < 1.25;
+    });
+    return { uris: Array.from(uris), keys: Array.from(keys), qr: API.qrList.length };
+  };
+  API.qrRect = function (i) {
+    const el = (API.qrList || [])[i];
+    if (!el || !el.isConnected) return null;
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height, vw: innerWidth, vh: innerHeight };
+  };
+  // Recovery codes: the codes of one list/element, chosen by selector or found as the only code-like list.
+  API.findRecovery = function (sel) {
+    const CODE = /^[A-Za-z0-9][A-Za-z0-9 -]{4,28}$/;
+    const items = (el) => {
+      const raw = el.value || el.innerText || el.textContent || '';
+      let parts = raw.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
+      if (parts.length < 6) parts = raw.split(/\s+/).filter(Boolean);
+      return parts;
+    };
+    const good = (x) => CODE.test(x) && /\d/.test(x) && x.length <= 30;
+    const rate = (el) => { const p = items(el); return { p: p, n: p.filter(good).length }; };
+    if (sel) {
+      let el; try { el = document.querySelector(sel); } catch (e) { return err('BAD_SELECTOR', String(e.message || e)); }
+      if (!el) return err('NO_MATCH', 'No element matches ' + sel + '.');
+      const r = rate(el);
+      if (r.n < 4 || r.n < r.p.length * 0.9) return err('NO_RECOVERY_CODES', sel + ' does not look like a list of recovery codes (' + r.n + ' of ' + r.p.length + ' items look like codes). Nothing was saved.');
+      return { ok: true, codes: r.p.filter(good) };
+    }
+    const q = Array.from(document.querySelectorAll('ul,ol,pre,code,textarea,div,p,td,section')).filter((el) => {
+      if (isHidden(el)) return false;
+      const r = rate(el);
+      return r.n >= 6 && r.n <= 40 && r.n >= r.p.length * 0.9;
+    });
+    const deepest = q.filter((el) => !q.some((o) => o !== el && el.contains(o)));
+    if (deepest.length !== 1)
+      return err('NO_RECOVERY_CODES', (deepest.length ? 'Found ' + deepest.length + ' possible lists of recovery codes' : 'Found no list of recovery codes') + '. Pass a CSS selector for the element that holds the codes. Nothing was saved.');
+    return { ok: true, codes: rate(deepest[0]).p.filter(good) };
   };
 
   // ---- vault login: find the username / password / one-time-code fields and fill them -------------

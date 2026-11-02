@@ -17,12 +17,14 @@ struct VaultMeta: Codable {
     var confirm: Bool
     var totp: Bool
     var created: String
+    var recovery: Int? = nil  // number of saved recovery codes
 }
 
 struct VaultSecret: Codable {
     var username: String
     var password: String
     var totp: String?
+    var recovery: [String]? = nil
 }
 
 struct VaultEntry {
@@ -95,7 +97,14 @@ struct KeychainVaultStore: VaultStore {
             guard replace else {
                 throw CmdError(code: "VAULT_EXISTS", message: "entry \"\(entry.name)\" already exists; pass --replace to overwrite it (the password must be entered again).")
             }
-            _ = try remove(entry.name)
+            // Update in place so a failure cannot lose the old entry.
+            let changes: [String: Any] = [
+                kSecAttrComment as String: String(decoding: try JSONEncoder().encode(entry.meta), as: UTF8.self),
+                kSecValueData as String: try JSONEncoder().encode(entry.secret),
+            ]
+            let st = SecItemUpdate(base(entry.name) as CFDictionary, changes as CFDictionary)
+            guard st == errSecSuccess else { throw fail(st, "cannot update vault entry") }
+            return
         }
         var q = base(entry.name)
         q[kSecAttrLabel as String] = "agent-browser vault: \(entry.name)"
@@ -208,6 +217,31 @@ func base32Decode(_ s: String) -> Data? {
     return out.isEmpty ? nil : out
 }
 
+func base32Encode(_ data: Data) -> String {
+    let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    var out = "", acc = 0, bits = 0
+    for b in data {
+        acc = (acc << 8) | Int(b)
+        bits += 8
+        while bits >= 5 { bits -= 5; out.append(alphabet[(acc >> bits) & 31]) }
+        acc &= (1 << bits) - 1
+    }
+    if bits > 0 { out.append(alphabet[(acc << (5 - bits)) & 31]) }
+    return out
+}
+
+/// The otpauth:// link for a stored secret (the stored text itself when it already is one).
+func otpauthURI(stored: String, issuer: String, account: String) -> String {
+    if stored.lowercased().hasPrefix("otpauth://") { return stored }
+    var c = URLComponents()
+    c.scheme = "otpauth"
+    c.host = "totp"
+    c.path = "/\(issuer):\(account)"
+    c.queryItems = [URLQueryItem(name: "secret", value: base32Encode((try? parseTOTP(stored))?.secret ?? Data())),
+                    URLQueryItem(name: "issuer", value: issuer)]
+    return c.string ?? stored
+}
+
 /// Accepts a bare base32 secret or an otpauth://totp/... URI.
 func parseTOTP(_ input: String) throws -> TOTPParams {
     let t = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -298,6 +332,17 @@ final class Redactor {
     }
     var isEmpty: Bool { secrets.isEmpty }
 
+    /// A TOTP setup secret as a page may display it: plain, in groups of four, dashed, either case, and as the link.
+    func addSetupSecret(_ params: TOTPParams, stored: String) {
+        let key = base32Encode(params.secret)
+        add(key); add(key.lowercased()); add(stored)
+        let groups = stride(from: 0, to: key.count, by: 4).map { i -> String in
+            let a = key.index(key.startIndex, offsetBy: i), b = key.index(a, offsetBy: 4, limitedBy: key.endIndex) ?? key.endIndex
+            return String(key[a..<b])
+        }
+        for sep in [" ", "-"] { add(groups.joined(separator: sep)); add(groups.joined(separator: sep).lowercased()) }
+    }
+
     private func variants(_ s: String) -> [String] {
         var v = [s]
         if let e = s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { v.append(e) }
@@ -327,17 +372,38 @@ final class Redactor {
 
 // MARK: - Human approval
 
-/// Entries marked `confirm` need the person at the Mac to approve each use (Touch ID or password).
+private func testStoreApproval() -> (ok: Bool, why: String) {
+    // Test store only: never honoured for the real keychain vault, so an agent cannot set it to skip approval.
+    switch ProcessInfo.processInfo.environment["AGENT_BROWSER_VAULT_APPROVE"] {
+    case "yes": return (true, "")
+    case "no": return (false, "denied")
+    default: return (false, "no approval available in the test store")
+    }
+}
+
+/// Asks the person at the Mac (Touch ID or password) before a vault value is used or shown.
+func requestApprovalSync(reason: String, store: VaultStore) -> (ok: Bool, why: String) {
+    if store.isTestStore { return testStoreApproval() }
+    let ctx = LAContext()
+    var nsErr: NSError?
+    guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &nsErr) else {
+        return (false, "approval is unavailable: \(nsErr?.localizedDescription ?? "no authentication method")")
+    }
+    final class Box: @unchecked Sendable { var ok = false; var why = "" }
+    let box = Box()
+    let sem = DispatchSemaphore(value: 0)
+    ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, err in
+        box.ok = ok
+        box.why = ok ? "" : (err?.localizedDescription ?? "denied")
+        sem.signal()
+    }
+    sem.wait()
+    return (box.ok, box.why)
+}
+
 @MainActor
 func requestApproval(reason: String, store: VaultStore) async -> (ok: Bool, why: String) {
-    if store.isTestStore {
-        // Test store only: never honoured for the real keychain vault, so an agent cannot set it to skip approval.
-        switch ProcessInfo.processInfo.environment["AGENT_BROWSER_VAULT_APPROVE"] {
-        case "yes": return (true, "")
-        case "no": return (false, "denied")
-        default: return (false, "no approval available in the test store")
-        }
-    }
+    if store.isTestStore { return testStoreApproval() }
     let ctx = LAContext()
     var nsErr: NSError?
     guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &nsErr) else {

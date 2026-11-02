@@ -1,0 +1,6 @@
+<!doctype html><html><head><title>Set up two-factor (key)</title></head><body>
+<h1>Authenticator setup</h1>
+<label for="k">Setup key</label><input id="k" readonly value="JBSWY3DPEHPK3PXP">
+<p id="status"></p><label for="c">Verification code</label><input id="c" name="code" inputmode="numeric" autocomplete="off">
+<script>const expect=new URLSearchParams(location.search).get("expect");document.getElementById("c").addEventListener("input",e=>{document.getElementById("status").textContent=e.target.value===expect?"OTP OK":"OTP BAD"});</script>
+</body></html>

@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import UniformTypeIdentifiers
+import Vision
 import WebKit
 
 /// Socket file owned by this helper process; removed when it exits via `close`.
@@ -540,6 +541,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             if let name = args["secret"] as? String { return try await fillSecret(name, args) }
             return try await act("fill", ref: try str(args, "ref"), arg: try str(args, "text"))
         case "login": return try await login(args)
+        case "enroll": return try await enrollTOTP(args)
+        case "recovery": return try await saveRecovery(args)
         case "vault": return try vaultList()
         case "submit": return try await act("submit", ref: try str(args, "ref"), arg: "")
         case "upload": return try await upload(args)
@@ -796,7 +799,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
 
     private func vaultList() throws -> [String: Any] {
         let rows = try vaultStore.list().map { r -> [String: Any] in
-            ["name": r.name, "origins": r.meta.origins, "totp": r.meta.totp, "confirm": r.meta.confirm]
+            ["name": r.name, "origins": r.meta.origins, "totp": r.meta.totp, "confirm": r.meta.confirm, "recovery": r.meta.recovery ?? 0]
         }
         return ["entries": rows]
     }
@@ -875,6 +878,107 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             vaultAudit(vaultStore, ["entry": name, "action": "login", "origin": page, "outcome": e.code])
             throw e
         }
+    }
+
+    // MARK: 2FA enrollment and recovery codes
+
+    /// Reads QR codes off elements that look like one by rendering them and decoding with Vision.
+    private func scanQRCodes(count: Int) async -> [String] {
+        var payloads: [String] = []
+        for i in 0..<min(count, 6) {
+            guard let r = try? await js("return window.__abApi.qrRect(i)", ["i": i]) as? [String: Any],
+                  let x = (r["x"] as? NSNumber)?.doubleValue, let y = (r["y"] as? NSNumber)?.doubleValue,
+                  let w = (r["w"] as? NSNumber)?.doubleValue, let h = (r["h"] as? NSNumber)?.doubleValue,
+                  let vw = (r["vw"] as? NSNumber)?.doubleValue, let vh = (r["vh"] as? NSNumber)?.doubleValue
+            else { continue }
+            try? await Task.sleep(nanoseconds: 80_000_000)  // let the scroll settle
+            let pad = 16.0
+            let rect = CGRect(x: max(0, x - pad), y: max(0, y - pad), width: min(vw, w + 2 * pad), height: min(vh, h + 2 * pad))
+            let cfg = WKSnapshotConfiguration()
+            cfg.rect = rect
+            cfg.snapshotWidth = NSNumber(value: max(500, rect.width * 2))
+            guard let img = try? await webView.takeSnapshot(configuration: cfg),
+                  let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }
+            let req = VNDetectBarcodesRequest()
+            req.symbologies = [.qr]
+            try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
+            payloads += (req.results ?? []).compactMap { $0.payloadStringValue }
+        }
+        return payloads
+    }
+
+    private func enrollTOTP(_ args: [String: Any]) async throws -> [String: Any] {
+        let name = try str(args, "secret")
+        let replace = args["replace"] as? Bool == true
+        let (entry, page) = try await unlock(name, action: "enroll", needs: [])
+        if entry.secret.totp != nil && !replace {
+            throw CmdError(code: "VAULT_HAS_TOTP", message: "entry \"\(name)\" already has a TOTP secret; pass --replace to overwrite it. Nothing was changed.")
+        }
+        guard let found = try await js("return window.__abApi.findSetup()") as? [String: Any] else {
+            throw CmdError(code: "ENROLL_FAILED", message: "could not inspect the page")
+        }
+        var candidates: [(params: TOTPParams, stored: String, source: String)] = []
+        for u in found["uris"] as? [String] ?? [] { if let p = try? parseTOTP(u) { candidates.append((p, u, "link")) } }
+        let qrCount = (found["qr"] as? NSNumber)?.intValue ?? 0
+        if qrCount > 0 {
+            for payload in await scanQRCodes(count: qrCount) where payload.lowercased().hasPrefix("otpauth://totp") {
+                if let p = try? parseTOTP(payload) { candidates.append((p, payload, "qr")) }
+            }
+        }
+        for k in found["keys"] as? [String] ?? [] { if let p = try? parseTOTP(k) { candidates.append((p, k, "key")) } }
+
+        var distinct: [(params: TOTPParams, stored: String, source: String)] = []
+        for c in candidates where !distinct.contains(where: { $0.params.secret == c.params.secret }) { distinct.append(c) }
+        // Remember everything we saw so it is scrubbed from later output, whether or not it is saved.
+        for c in candidates { redactor.addSetupSecret(c.params, stored: c.stored) }
+        guard !distinct.isEmpty else {
+            vaultAudit(vaultStore, ["entry": name, "action": "enroll", "origin": page, "outcome": "TOTP_NOT_FOUND"])
+            throw CmdError(code: "TOTP_NOT_FOUND", message: "no 2FA setup key, otpauth link or QR code was found on this page (\(qrCount) QR-sized images checked). Open the page that shows the setup key, or ask the user to enter the secret with `vault add --totp`.")
+        }
+        let sources = ["link", "qr", "key"].map { k in "\(k): \(candidates.filter { $0.source == k }.count)" }.joined(separator: ", ")
+        guard distinct.count == 1 else {
+            vaultAudit(vaultStore, ["entry": name, "action": "enroll", "origin": page, "outcome": "TOTP_AMBIGUOUS"])
+            throw CmdError(code: "TOTP_AMBIGUOUS", message: "found \(distinct.count) different 2FA secrets on this page (\(sources)); refusing to guess. Nothing was saved.")
+        }
+        // Prefer the full link (it carries issuer, digits, period and algorithm) over a bare key.
+        let chosen = candidates.first(where: { $0.params.secret == distinct[0].params.secret && $0.stored.lowercased().hasPrefix("otpauth://") }) ?? distinct[0]
+        var updated = entry
+        updated.secret.totp = chosen.stored
+        updated.meta.totp = true
+        try vaultStore.put(updated, replace: true)
+        vaultAudit(vaultStore, ["entry": name, "action": "enroll", "origin": page, "source": chosen.source, "outcome": "ok"])
+
+        var res: [String: Any] = ["entry": name, "saved": true, "source": chosen.source, "digits": chosen.params.digits,
+                                  "period": chosen.params.period, "algorithm": chosen.params.algorithm,
+                                  "next": "type the current code into the page's verification field with: fill <ref> --secret \(name) --field totp"]
+        if let c = URLComponents(string: chosen.stored), c.host?.lowercased() == "totp" {
+            if let issuer = c.queryItems?.first(where: { $0.name == "issuer" })?.value { res["issuer"] = issuer }
+            let label = c.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !label.isEmpty { res["account"] = label.split(separator: ":", maxSplits: 1).last.map(String.init) ?? label }
+        }
+        return res
+    }
+
+    private func saveRecovery(_ args: [String: Any]) async throws -> [String: Any] {
+        let name = try str(args, "secret")
+        let (entry, page) = try await unlock(name, action: "recovery", needs: [])
+        let sel = (args["selector"] as? String) ?? ""
+        guard let found = try await js("return window.__abApi.findRecovery(sel)", ["sel": sel]) as? [String: Any] else {
+            throw CmdError(code: "RECOVERY_FAILED", message: "could not inspect the page")
+        }
+        if found["ok"] as? Bool != true {
+            vaultAudit(vaultStore, ["entry": name, "action": "recovery", "origin": page, "outcome": found["code"] as? String ?? "failed"])
+            throw CmdError(code: found["code"] as? String ?? "NO_RECOVERY_CODES", message: found["message"] as? String ?? "no recovery codes found")
+        }
+        let codes = found["codes"] as? [String] ?? []
+        for c in codes { redactor.add(c) }
+        var updated = entry
+        updated.secret.recovery = codes
+        updated.meta.recovery = codes.count
+        try vaultStore.put(updated, replace: true)
+        vaultAudit(vaultStore, ["entry": name, "action": "recovery", "origin": page, "count": codes.count, "outcome": "ok"])
+        return ["entry": name, "saved": codes.count,
+                "note": "stored in the vault; the user can view them with `vault export \(name)` in a terminal"]
     }
 
     // MARK: uploads
