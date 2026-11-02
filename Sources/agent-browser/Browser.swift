@@ -319,7 +319,7 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     private var blockRules: [(label: String, rule: [String: Any])] = []
 
     /// Stable store id derived from the profile name, so the same name always reopens the same data.
-    private static func storeID(for profile: String) -> UUID {
+    static func storeID(for profile: String) -> UUID {
         var b = Array(SHA256.hash(data: Data("agent-browser-profile:\(profile)".utf8)).prefix(16))
         b[6] = (b[6] & 0x0F) | 0x50
         b[8] = (b[8] & 0x3F) | 0x80
@@ -707,7 +707,19 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     /// Stops this session. Persistent profiles need time to flush cookies/storage to disk: a round trip to the
     /// network process first makes sure it has seen every recent cookie change; the pause lets it write them.
     func shutdown() async {
-        if profile != nil { await flushCookies(); await persistCookies() }
+        if profile != nil {
+            await flushCookies(); await persistCookies()
+            // Keep logins and site data, drop the page cache: it grows to tens of MB per profile and only speeds up reloads.
+            // Best effort and bounded: closing must never wait on WebKit.
+            let store = configuration.websiteDataStore
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                var resumed = false
+                let finish = { if !resumed { resumed = true; cont.resume() } }
+                store.removeData(ofTypes: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeFetchCache],
+                                 modifiedSince: .distantPast) { finish() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish() }
+            }
+        }
         let delay = profile == nil ? 0.1 : 2.0
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             MainActor.assumeIsolated {
@@ -1001,6 +1013,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     }
 
     private var lastFavicon: String?
+    private var faviconFor = ""
+    private var faviconAt = Date.distantPast
 
     private func status() async -> [String: Any] {
         let dlg = dialogFor  // read before any await: a pending dialog blocks the page's JavaScript
@@ -1014,7 +1028,12 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "started": Int(startedAt.timeIntervalSince1970),
             "recent_steps": watch.recentSteps.suffix(8).map { $0 },
         ]
-        if dlg == nil {
+        // Asked of the page only when the address changed (or the icon was missing a few seconds ago): the menu bar
+        // item polls `status`, and running page script on every poll costs CPU in the page for nothing.
+        let here = current.webView.url?.absoluteString ?? ""
+        if dlg == nil, here != faviconFor || (lastFavicon == nil && Date().timeIntervalSince(faviconAt) > 5) {
+            faviconFor = here
+            faviconAt = Date()
             lastFavicon = (try? await js("""
                 const p = location.protocol; if (p !== 'https:' && p !== 'http:') return null;
                 const l = Array.from(document.querySelectorAll('link[rel~="icon" i]')).find(x => x.getAttribute('href'));

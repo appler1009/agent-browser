@@ -176,7 +176,15 @@ final class MenubarApp: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.autoenablesItems = false
         item.menu = menu
         refreshNow()
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        scheduleNextPoll()
+    }
+
+    /// Polls fast while something is happening, slowly while everything is idle, and rarely with no sessions;
+    /// opening the menu always refreshes at once.
+    private func scheduleNextPoll() {
+        let busy = sessions.contains { ($0["state"] as? String ?? "idle") != "idle" || $0["needs_you"] as? Bool == true }
+        let seconds: Double = menuOpen || busy ? 2 : (sessions.isEmpty ? 10 : 5)
+        Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshAsync() }
         }
     }
@@ -184,7 +192,7 @@ final class MenubarApp: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private func refreshAsync() {
         DispatchQueue.global().async {
             let r = listSessions()
-            DispatchQueue.main.async { MainActor.assumeIsolated { self.apply(r.sessions, r.stale) } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.apply(r.sessions, r.stale); self.scheduleNextPoll() } }
         }
     }
 

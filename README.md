@@ -53,10 +53,11 @@ The first command starts a background helper that owns the page (`close` stops i
 | `sessions` | every running session with its state; never starts one |
 | `menubar [start\|install\|uninstall]` | menu bar item, see [Menu bar](#menu-bar) |
 | `note list` / `show <host>` / `add <host> "text"` / `rm <host> <id>` | short how-to notes per site that agents read before working and add when they work something out, see [Notes](#notes-per-site) |
+| `profile list` / `rm <name>` / `prune` | disk used by saved profiles; `rm` deletes one for good, `prune` lists data left by deleted profiles (`--yes` deletes; terminal only) |
 | `policy [show]` / `check` (`set`, `reset` are for you) | limits on hosts, private addresses, tabs, downloads and dialogs, see [Policy](#policy-limits-you-set) |
 | `status`, `cdp`, `mcp`, `close` | |
 
-`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). The helper also saves **all** of the profile's cookies, session cookies without an expiry included, to `~/.agent-browser/profiles/NAME/cookies.enc` and restores them at startup, because WebKit drops session cookies on exit and, on some macOS versions, doesn't write its store before exiting. That file is encrypted (AES-256-GCM) with a random key kept in your login keychain, and is owner-only; if the key is unavailable the cookies are not saved (never written as plain text), and a file that can't be decrypted is kept as `cookies.enc.unreadable`. WebKit's own data folder for the profile (localStorage and similar) is not encrypted by agent-browser; FileVault covers it. `cookies export` writes the plain JSON you ask for, owner-only. The menu bar item shows each session's profile and when its cookies were last saved.
+`--profile NAME` keeps cookies and storage between runs (default: temporary, discarded on close). The helper also saves **all** of the profile's cookies, session cookies without an expiry included, to `~/.agent-browser/profiles/NAME/cookies.enc` and restores them at startup, because WebKit drops session cookies on exit and, on some macOS versions, doesn't write its store before exiting. That file is encrypted (AES-256-GCM) with a random key kept in your login keychain, and is owner-only; if the key is unavailable the cookies are not saved (never written as plain text), and a file that can't be decrypted is kept as `cookies.enc.unreadable`. WebKit's own data folder for the profile (localStorage and similar) is not encrypted by agent-browser; FileVault covers it. `cookies export` writes the plain JSON you ask for, owner-only. The menu bar item shows each session's profile and when its cookies were last saved. When a persistent session closes, the page cache (tens of MB) is dropped; logins and site data are kept.
 
 ## What agents get back
 
@@ -150,7 +151,7 @@ Covers Target, Page (navigate, lifecycle, screenshot, PDF), Runtime, DOM, Input,
 ## Development
 
 ```sh
-Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 302 checks; needs jq, optionally node 22+ and network)
+Tests/integration.sh        # drives the real helper against local fixtures (≈30 s, 311 checks; needs jq, optionally node 22+ and network)
 Tests/cdp-compat.sh         # opt-in: installs Puppeteer and Playwright in a temp dir and runs both
 ```
 

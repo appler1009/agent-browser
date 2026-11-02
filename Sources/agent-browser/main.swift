@@ -28,6 +28,7 @@ usage: agent-browser [--session NAME] [--profile NAME] <command> [args]
   useragent <string...>|reset      user agent for pages loaded from now on
   block images|media|fonts|scripts|styles | url <regex> | clear | status   content blocking for new requests
   note list | show <host> | add <host> "text" | rm <host> <id>   how-to notes per site (--here = current page); agents save and read them
+  profile list | rm <name> | prune [--yes]   saved logins on disk: sizes; rm deletes one for good, prune lists data of deleted profiles (terminal only to delete)
   policy [show] | set ... | reset  limits you set from a terminal: allowed/denied hosts, private addresses, tabs, downloads, dialogs
   status                           session, profile, tabs
   cdp [start [--port N] | stop | status]   thin DevTools-protocol endpoint on 127.0.0.1 for Puppeteer/Playwright-style tools
@@ -308,6 +309,9 @@ if cmd == "sessions" {
 }
 if cmd == "menubar" {
     runMenubarCLI(Array(argv.dropFirst()))
+}
+if cmd == "profile" {
+    MainActor.assumeIsolated { runProfileCLI(Array(argv.dropFirst())) }
 }
 if cmd == "note" {
     runNoteCLI(Array(argv.dropFirst()), session: session)

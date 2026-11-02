@@ -642,6 +642,12 @@ nab watch off >/dev/null; sleep 0.5
 ab watch off >/dev/null; sleep 0.5
 nab close >/dev/null 2>&1
 
+# --- profile management ----------------------------------------------------
+R=$(ab profile list);  check "profile list shows the test profile with sizes" '(.result.profiles[]|select(.profile=="'"$PN"'")|.total_bytes>0)' "$R"
+R=$(ab profile rm "$PN" </dev/null);  check "profile rm needs a terminal" '.error.code=="NEEDS_TERMINAL"' "$R"
+R=$(ab profile prune);  check "profile prune only lists by default" '.ok and .result.deleted==false' "$R"
+R=$(ab profile rm no-such-profile);  check "profile rm of an unknown name fails" '.error.code=="NOT_FOUND"' "$R"
+
 # --- idle sessions suspend media; status polling is not activity ---------
 IS="$AGENT_BROWSER_SESSION-idle"
 iab() { AGENT_BROWSER_SESSION="$IS" "$BIN" "$@"; }
