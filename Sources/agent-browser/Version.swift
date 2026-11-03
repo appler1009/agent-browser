@@ -1,2 +1,2 @@
 /// Keep in sync with the VERSION file (Scripts/package.sh checks this).
-let agentBrowserVersion = "0.2.0"
+let agentBrowserVersion = "0.2.1"
