@@ -315,6 +315,9 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     let profile: String?
     /// Called once the session has shut down (the host closes its socket and window).
     var onClose: (@MainActor () -> Void)?
+    /// Called when the session stops taking requests (its data is saved); `onClose` follows once its pages are released.
+    var onClosing: (@MainActor () -> Void)?
+    private var closing = false
     private var dialogTimeoutOverride: String?
     private var userAgent: String?
     private var blockRules: [(label: String, rule: [String: Any])] = []
@@ -708,6 +711,8 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
     /// Stops this session. Persistent profiles need time to flush cookies/storage to disk: a round trip to the
     /// network process first makes sure it has seen every recent cookie change; the pause lets it write them.
     func shutdown() async {
+        if closing { return }  // a second close while this one runs changes nothing
+        closing = true
         if profile != nil {
             await flushCookies(); await persistCookies()
             // Keep logins and site data, drop the page cache: it grows to tens of MB per profile and only speeds up reloads.
@@ -721,6 +726,10 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish() }
             }
         }
+        // From here on new commands start a fresh session instead of reaching this one while it winds down.
+        let stop = onClosing
+        onClosing = nil
+        stop?()
         let delay = profile == nil ? 0.1 : 2.0
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             MainActor.assumeIsolated {
@@ -794,6 +803,11 @@ final class Browser: NSObject, WKScriptMessageHandler, WKDownloadDelegate {
            let l = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
             list += l
             migrated = true
+        }
+        // The saved file is the truth for this profile: whatever else WebKit still has on disk (a deletion it had not
+        // written yet when the last run ended) must not come back.
+        if cookieSaveError == nil, FileManager.default.fileExists(atPath: file) {
+            for c in await store.allCookies() { await store.deleteCookie(c) }
         }
         for d in list {
             if let e = (d["expires"] as? NSNumber)?.doubleValue, Date(timeIntervalSince1970: e) < Date() { continue }

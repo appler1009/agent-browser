@@ -63,7 +63,8 @@ final class SessionHost {
         guard let listenFd = listenSocket(path) else { return false }
         let browser = Browser(session: session, profile: profile)
         sessions[session] = Entry(browser: browser, listenFd: listenFd, path: path)
-        browser.onClose = { [unowned self] in self.finish(session) }
+        browser.onClosing = { [unowned self] in self.stopAccepting(session) }
+        browser.onClose = { [unowned self] in self.tornDown() }
         Thread.detachNewThread {
             while true {
                 let c = accept(listenFd, nil, nil)
@@ -81,11 +82,20 @@ final class SessionHost {
         return true
     }
 
-    private func finish(_ session: String) {
+    private var tearingDown = 0
+
+    /// The session is saved and takes no more requests: its socket goes now, so the next command for the same name
+    /// starts a new session while this one finishes releasing its pages.
+    private func stopAccepting(_ session: String) {
         guard let e = sessions.removeValue(forKey: session) else { return }
         unlink(e.path)
         close(e.listenFd)
-        if sessions.isEmpty {
+        tearingDown += 1
+    }
+
+    private func tornDown() {
+        tearingDown -= 1
+        if sessions.isEmpty && tearingDown <= 0 {
             leaving = true
             unlink(hostControlPath())  // new sessions start a new host from here on
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }

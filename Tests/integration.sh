@@ -26,7 +26,7 @@ export AGENT_BROWSER_IDLE_SUSPEND_SECS=3   # idle sessions stop media after 3 s 
 export AGENT_BROWSER_NOTES_DIR="$VT/notes"   # test notes; ~/.agent-browser/notes is never touched
 export AGENT_BROWSER_VAULT_FILE="$VT/vault.json"   # test store; the real keychain is never touched
 vab() { local o; o=$(AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-vault" "$BIN" "$@"); echo "$o" >> "$VT/all-output.log"; echo "$o"; }
-trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes -idle -leak -log; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; sleep 3; AGENT_BROWSER_PROFILE_RM_YES=1 "$BIN" profile rm "itest$$" >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
+trap 'for x in "" -vault -vok -vno -vcdp -dlg -notes -idle -leak -log -fresh; do AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION$x" "$BIN" close >/dev/null 2>&1; done; kill $NPID 2>/dev/null; rm -rf "$VT"; ab close >/dev/null 2>&1; AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-prof" ab close >/dev/null 2>&1; sleep 3; AGENT_BROWSER_PROFILE_RM_YES=1 "$BIN" profile rm "itest$$" >/dev/null 2>&1; rm -rf "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION" "$HOME/.agent-browser/downloads/$AGENT_BROWSER_SESSION-prof" "$HOME/.agent-browser/profiles/itest$$"; rmdir "$HOME/.agent-browser/profiles" 2>/dev/null' EXIT
 
 # --- login flow --------------------------------------------------------
 R=$(ab open "file://$FIX/login.html");           check "open login" '.ok and .result.title=="Login"' "$R"
@@ -675,6 +675,13 @@ check "an idle session that is only polled suspends media" '.result.media_suspen
 iab snapshot >/dev/null
 check "the next command resumes media" '.result.media_suspended==false' "$(iab status)"
 iab close >/dev/null
+
+# --- a command right after close starts a fresh session ---------------------
+CS="$AGENT_BROWSER_SESSION-fresh"
+cab() { AGENT_BROWSER_SESSION="$CS" "$BIN" "$@"; }
+cab open "file://$FIX/login.html" >/dev/null; cab close >/dev/null
+check "a command right after close gets a new, empty session (not the one closing)" '.ok and .result.url==""' "$(cab status)"
+cab close >/dev/null
 
 # --- closing a session frees it; close-then-open right away works ---------
 LK="$AGENT_BROWSER_SESSION-leak"
